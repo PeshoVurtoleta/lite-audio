@@ -624,6 +624,26 @@
                 grid-area: strips;
             }
 
+            #deck-music {
+                grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+                grid-template-rows: minmax(9rem, 1fr) minmax(8rem, 1fr);
+                grid-template-areas:
+        "xfade  mctl"
+        "tracks mctl";
+            }
+
+            #p-xfade {
+                grid-area: xfade;
+            }
+
+            #p-tracks {
+                grid-area: tracks;
+            }
+
+            #p-music-ctl {
+                grid-area: mctl;
+            }
+
             #deck-voices {
                 grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
                 grid-template-rows: minmax(10rem, 1fr) auto;
@@ -671,6 +691,7 @@
     <button data-scene="1" aria-pressed="false">2 / loader</button>
     <button data-scene="2" aria-pressed="false">3 / mixer</button>
     <button data-scene="3" aria-pressed="false">4 / voices</button>
+    <button data-scene="4" aria-pressed="false">5 / music</button>
 </nav>
 
 <!-- ============================ UNLOCK =================================== -->
@@ -879,6 +900,64 @@
     </section>
 </main>
 
+<!-- ============================ MUSIC ==================================== -->
+<main id="deck-music" class="deck" hidden>
+    <section id="p-xfade" class="panel">
+        <div class="panel-title"><span>crossfade scope / xfadeGain per track</span><b id="power-now">power 0.00</b>
+        </div>
+        <div class="screen">
+            <canvas id="cv-xfade"></canvas>
+        </div>
+        <p class="note">Two gains and the power they add up to, <em>sqrt(a^2 + b^2)</em>. The engine curves both sides
+            on <em>sin</em> and <em>cos</em>, so the white line holds at 1.0 across the whole fade. A linear crossfade
+            sags to <b>0.71</b> in the middle - the hole you hear in the mix.</p>
+    </section>
+
+    <section id="p-tracks" class="panel">
+        <div class="panel-title"><span>transport / trackPosition + trackDuration signals</span></div>
+        <div class="screen">
+            <canvas id="cv-tracks"></canvas>
+        </div>
+    </section>
+
+    <section id="p-music-ctl" class="panel">
+        <div class="panel-title"><span>music</span><b id="music-hint">unlock on scene 1 first</b></div>
+        <div class="row">
+            <span class="lbl">theme / native loop</span>
+            <button data-track-play="theme">play</button>
+            <button data-track-stop="theme">stop</button>
+            <button data-track-pause="theme">pause</button>
+            <button data-track-resume="theme">resume</button>
+        </div>
+        <div class="row">
+            <span class="lbl">boss / loopStart 2s, loopEnd 6s</span>
+            <button data-track-play="boss">play</button>
+            <button data-track-stop="boss">stop</button>
+            <button data-track-pause="boss">pause</button>
+            <button data-track-resume="boss">resume</button>
+        </div>
+        <div class="slider">
+            <label for="s-xfade">crossfade</label>
+            <input id="s-xfade" type="range" min="100" max="2000" step="50" value="800"/>
+            <output id="o-xfade">800ms</output>
+        </div>
+        <div class="row">
+            <button id="b-xf-boss">crossfade theme -&gt; boss</button>
+            <button id="b-xf-theme">crossfade boss -&gt; theme</button>
+        </div>
+        <div class="row">
+            <button id="b-exclusive">playExclusive(boss)</button>
+            <button id="b-stop-music">stopBus(music)</button>
+        </div>
+        <p class="note">Tracks stream through <em>MediaElementAudioSourceNode</em> into the same buses as the SFX, so
+            the faders on scene 3 move them too. <b>stop then resume</b> is the one to try: stopTrack fades the gain to
+            zero, so resume has to put it back or the track decodes, reports itself playing, and is silent.</p>
+        <p class="note">Boss loops on custom points, so the engine seeks on <em>timeupdate</em> instead of using <em>element.loop</em>.
+            That event fires about four times a second, so the seek can land up to ~250ms late - watch the playhead
+            overshoot the loop marker before it snaps back. An honest limit, not a bug to hide.</p>
+    </section>
+</main>
+
 <div class="rack">
     <section class="panel">
         <div class="panel-title"><span>engine</span></div>
@@ -955,6 +1034,14 @@
     ];
     const BROKEN_ID = 'broken';
 
+    // Music. Streamed through <audio> rather than decoded into a pool, so these are
+    // rendered offline like the SFX but handed to defineTracks() instead of defineSounds().
+    const TRACKS = [
+        ['theme', synthTheme, 0.7, {loop: true}],
+        ['boss', synthBoss, 0.7, {loop: true, loopStart: 2, loopEnd: 6}],
+    ];
+    const TRACK_IDS = ['theme', 'boss'];
+
     const H_LIVE = 0, H_ENDED = 1, H_STOLEN = 2, H_STOPPED = 3;
     const H_LABEL = ['LIVE', 'ENDED', 'STOLEN', 'STOPPED'];
     const H_CLASS = ['st live', 'st ended', 'st stolen', 'st stopped'];
@@ -975,6 +1062,7 @@
     const C_CLEAR = OKLCH ? 'oklch(0.18 0.02 145)' : '#0a100b';
 
     const BUS_COLOR = [C_PHOS, C_AMBER, C_CYAN];
+    const TRACK_COLOR = [C_PHOS, C_HOT];
     const FONT_S = '9px ui-monospace, Menlo, Consolas, monospace';
     const FONT_M = '10px ui-monospace, Menlo, Consolas, monospace';
 
@@ -988,6 +1076,7 @@
         document.getElementById('deck-loader'),
         document.getElementById('deck-mixer'),
         document.getElementById('deck-voices'),
+        document.getElementById('deck-music'),
     ];
 
     const $bState = document.getElementById('b-state');
@@ -1034,6 +1123,15 @@
     const $eReady = document.getElementById('e-ready');
     const $bStopAll = document.getElementById('b-stopall');
 
+    const $musicHint = document.getElementById('music-hint');
+    const $powerNow = document.getElementById('power-now');
+    const $sXfade = document.getElementById('s-xfade');
+    const $oXfade = document.getElementById('o-xfade');
+    const $bXfBoss = document.getElementById('b-xf-boss');
+    const $bXfTheme = document.getElementById('b-xf-theme');
+    const $bExclusive = document.getElementById('b-exclusive');
+    const $bStopMusic = document.getElementById('b-stop-music');
+
     const $log = document.getElementById('log');
     const $gate = document.getElementById('gate');
     const $gateBtn = document.getElementById('gate-btn');
@@ -1057,7 +1155,9 @@
     const cvGain = mkCanvas('cv-gain');
     const cvMeters = mkCanvas('cv-meters');
     const cvMatrix = mkCanvas('cv-matrix');
-    const ALL_CV = [cvGain, cvMeters, cvMatrix];
+    const cvXfade = mkCanvas('cv-xfade');
+    const cvTracks = mkCanvas('cv-tracks');
+    const ALL_CV = [cvGain, cvMeters, cvMatrix, cvXfade, cvTracks];
     let needResize = 1;
 
     function sizeAll() {
@@ -1261,6 +1361,75 @@
         });
     }
 
+    // Eight seconds each: long enough to crossfade over, short enough that the pair
+    // costs about a megabyte of WAV.
+    function synthTheme() {
+        return render(8.0, (off, out) => {
+            const lp = off.createBiquadFilter();
+            lp.type = 'lowpass';
+            lp.Q.value = 3;
+            lp.frequency.setValueAtTime(380, 0);
+            lp.frequency.linearRampToValueAtTime(1500, 4);
+            lp.frequency.linearRampToValueAtTime(380, 8);
+            const pad = off.createGain();
+            pad.gain.value = 0.10;
+            lp.connect(pad);
+            pad.connect(out);
+            for (let i = 0; i < 3; i++) {
+                const o = off.createOscillator();
+                o.type = 'sawtooth';
+                o.frequency.value = 110 * (i === 2 ? 1.5 : 1);
+                o.detune.value = (i - 1) * 8;
+                o.connect(lp);
+                o.start(0);
+                o.stop(8);
+            }
+            const ARP = [440, 523.25, 659.25, 523.25];
+            for (let k = 0; k < 32; k++) {
+                const t = k * 0.25;
+                const hz = ARP[k % 4] * (((k / 8) | 0) % 2 === 0 ? 1 : 0.75);
+                note(off, out, t, 0.2, hz);
+            }
+        });
+    }
+
+    function synthBoss() {
+        return render(8.0, (off, out) => {
+            for (let k = 0; k < 32; k++) {
+                const t = k * 0.25;
+                const o = off.createOscillator();
+                o.type = 'square';
+                o.frequency.setValueAtTime(82.41, t);
+                const g = off.createGain();
+                g.gain.setValueAtTime(0.0001, t);
+                g.gain.linearRampToValueAtTime(0.32, t + 0.008);
+                g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+                o.connect(g);
+                g.connect(out);
+                o.start(t);
+                o.stop(t + 0.22);
+            }
+            for (let k = 0; k < 8; k++) {
+                note(off, out, k * 1.0, 0.45, k % 2 === 0 ? 415.30 : 466.16);
+            }
+            for (let k = 0; k < 16; k++) {
+                const t = k * 0.5 + 0.25;
+                const nz = off.createBufferSource();
+                nz.buffer = noiseBuffer(off, 0.1, 3);
+                const hp = off.createBiquadFilter();
+                hp.type = 'highpass';
+                hp.frequency.value = 5200;
+                const g = off.createGain();
+                g.gain.setValueAtTime(0.18, t);
+                g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+                nz.connect(hp);
+                hp.connect(g);
+                g.connect(out);
+                nz.start(t);
+            }
+        });
+    }
+
     function encodeWav(buffer) {
         const len = buffer.length;
         const data = buffer.getChannelData(0);
@@ -1313,6 +1482,11 @@
             urlById.set(id, url);
             durById.set(id, buf.duration);
             if (id === 'thunder') latencyByUrl.set(url, THUNDER_LATENCY_MS);
+        }
+        for (const [id, synth] of TRACKS) {
+            const buf = await synth();
+            urlById.set(id, URL.createObjectURL(encodeWav(buf)));
+            durById.set(id, buf.duration);
         }
         urlById.set(BROKEN_ID, 'demo://unreachable-asset.mp3');
         durById.set(BROKEN_ID, 0);
@@ -1379,6 +1553,16 @@
 
     const levels = new Float32Array(BUSES.length);
     const peaks = new Float32Array(BUSES.length);
+
+    // One xfadeGain ring per track, plus the power they add up to.
+    const xfTrace = [new Float32Array(TRACE_CAP), new Float32Array(TRACE_CAP)];
+    const xfPower = new Float32Array(TRACE_CAP);
+    let xfHead = 0;
+    let xfadeMs = 0;   // seeded from the slider at init
+
+    // Position strings are formatted on the throttle pass and drawn from this cache:
+    // no toFixed inside the frame loop.
+    const posText = ['0.0 / 0.0s', '0.0 / 0.0s'];
 
     // handle table
     const hHandle = new Float64Array(HANDLE_ROWS);
@@ -1502,6 +1686,28 @@
         bindLoadSignals();
         await settled;
         updateReadyCount();
+
+        const trackConfig = {};
+        for (const [id, , volume, opts] of TRACKS) {
+            trackConfig[id] = {src: [urlById.get(id)], bus: 'music', volume, ...opts};
+        }
+        await engine.defineTracks(trackConfig);
+        bindTrackSignals();
+    }
+
+    function bindTrackSignals() {
+        for (const id of TRACK_IDS) {
+            const load = engine.trackLoadState(id);
+            const playing = engine.trackPlaying(id);
+            if (!load || !playing) continue;
+            effects.push(effect(() => {
+                logPush('load', 'track ' + id + ' -> ' + load());
+            }));
+            effects.push(effect(() => {
+                const on = playing();
+                logPush(on ? 'play' : 'stop', 'track ' + id + (on ? ' playing' : ' stopped'));
+            }));
+        }
     }
 
     function attachTaps() {
@@ -1859,6 +2065,160 @@
         traceHead = (traceHead + 1) | 0;
     }
 
+    // xfadeGain lives inside the private track record: the engine exposes trackPlaying
+    // and trackPosition, not the graph. Reading it is demo-only introspection - a game
+    // never needs it, but a demo that claims "equal power" owes you the gains.
+    function sampleXfade() {
+        if (!engine) return;
+        let sum = 0;
+        for (let i = 0; i < TRACK_IDS.length; i++) {
+            const rec = engine._tracks.get(TRACK_IDS[i]);
+            const g = rec && rec.xfadeGain ? rec.xfadeGain.gain.value : 0;
+            xfTrace[i][xfHead & TRACE_MASK] = g;
+            sum += g * g;
+        }
+        xfPower[xfHead & TRACE_MASK] = Math.sqrt(sum);
+        xfHead = (xfHead + 1) | 0;
+    }
+
+    function drawXfade() {
+        const c = cvXfade.c, w = cvXfade.w, h = cvXfade.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+
+        const top = 14;
+        const bot = h - 6;
+        const span = bot - top;
+
+        c.strokeStyle = C_GRID;
+        c.lineWidth = 1;
+        c.beginPath();
+        for (let i = 0; i <= 4; i++) {
+            const y = Math.round(top + span * i / 4) + 0.5;
+            c.moveTo(0, y);
+            c.lineTo(w, y);
+        }
+        c.stroke();
+
+        // Where a linear crossfade's combined power would sag.
+        const ySag = Math.round(bot - 0.7071 * span) + 0.5;
+        c.strokeStyle = C_AMBER;
+        c.globalAlpha = 0.4;
+        c.setLineDash([3, 3]);
+        c.beginPath();
+        c.moveTo(0, ySag);
+        c.lineTo(w, ySag);
+        c.stroke();
+        c.setLineDash([]);
+        c.globalAlpha = 1;
+        c.font = FONT_M;
+        c.fillStyle = C_AMBER;
+        c.fillText('0.71 linear sag', 6, ySag - 4);
+
+        const step = w / TRACE_CAP;
+        for (let t = 0; t < TRACK_IDS.length; t++) {
+            c.beginPath();
+            for (let k = 0; k < TRACE_CAP; k++) {
+                const v = xfTrace[t][(xfHead + k) & TRACE_MASK];
+                const x = k * step;
+                const y = bot - v * span;
+                if (k === 0) c.moveTo(x, y);
+                else c.lineTo(x, y);
+            }
+            c.strokeStyle = TRACK_COLOR[t];
+            c.lineWidth = 1.25;
+            c.stroke();
+        }
+
+        c.beginPath();
+        for (let k = 0; k < TRACE_CAP; k++) {
+            const v = xfPower[(xfHead + k) & TRACE_MASK];
+            const x = k * step;
+            const y = bot - v * span;
+            if (k === 0) c.moveTo(x, y);
+            else c.lineTo(x, y);
+        }
+        c.strokeStyle = C_INK;
+        c.lineWidth = 1.75;
+        c.stroke();
+
+        let lx = 6;
+        for (let t = 0; t < TRACK_IDS.length; t++) {
+            c.fillStyle = TRACK_COLOR[t];
+            c.fillText(TRACK_IDS[t], lx, 10);
+            lx += TRACK_IDS[t].length * 6 + 14;
+        }
+        c.fillStyle = C_INK;
+        c.fillText('combined power', lx, 10);
+    }
+
+    function drawTracks() {
+        const c = cvTracks.c, w = cvTracks.w, h = cvTracks.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+        if (!engine) return;
+
+        const rows = TRACK_IDS.length;
+        const rh = h / rows;
+        c.font = FONT_M;
+        c.textBaseline = 'top';
+
+        for (let i = 0; i < rows; i++) {
+            const id = TRACK_IDS[i];
+            const playingSig = engine.trackPlaying(id);
+            const posSig = engine.trackPosition(id);
+            const durSig = engine.trackDuration(id);
+            if (!playingSig || !posSig || !durSig) continue;
+
+            const on = playingSig.peek();
+            const pos = posSig.peek();
+            const dur = durSig.peek() || durById.get(id) || 1;
+            const y0 = i * rh + 8;
+            const barY = y0 + 18;
+            const barH = 14;
+            const x0 = 8;
+            const bw = w - 16;
+
+            c.fillStyle = on ? TRACK_COLOR[i] : C_DIM;
+            c.fillText(id, x0, y0);
+            c.fillStyle = C_DIM;
+            c.fillText(posText[i], x0 + 56, y0);
+            c.fillText(on ? 'playing' : 'stopped', w - 62, y0);
+
+            c.fillStyle = 'rgba(255,255,255,0.03)';
+            c.fillRect(x0, barY, bw, barH);
+
+            const opts = TRACKS[i][3];
+            if (opts.loopEnd != null) {
+                const lx = x0 + (opts.loopStart / dur) * bw;
+                const lw = ((opts.loopEnd - opts.loopStart) / dur) * bw;
+                c.fillStyle = C_PHOS_12;
+                c.fillRect(lx, barY, lw, barH);
+                c.strokeStyle = C_AMBER;
+                c.lineWidth = 1;
+                c.beginPath();
+                c.moveTo(Math.round(lx) + 0.5, barY);
+                c.lineTo(Math.round(lx) + 0.5, barY + barH);
+                c.moveTo(Math.round(lx + lw) + 0.5, barY);
+                c.lineTo(Math.round(lx + lw) + 0.5, barY + barH);
+                c.stroke();
+            }
+
+            const px = x0 + Math.min(1, pos / dur) * bw;
+            c.fillStyle = on ? TRACK_COLOR[i] : C_DIM;
+            c.globalAlpha = 0.45;
+            c.fillRect(x0, barY, px - x0, barH);
+            c.globalAlpha = 1;
+            c.fillStyle = C_INK;
+            c.fillRect(px - 1, barY - 2, 2, barH + 4);
+
+            c.strokeStyle = C_GRID;
+            c.lineWidth = 1;
+            c.strokeRect(x0 + 0.5, barY + 0.5, bw - 1, barH - 1);
+        }
+        c.textBaseline = 'alphabetic';
+    }
+
     function drawGainScope() {
         const c = cvGain.c, w = cvGain.w, h = cvGain.h;
         c.fillStyle = C_CLEAR;
@@ -2021,10 +2381,15 @@
 
         if (engine) {
             sampleTraces();
+            sampleXfade();
             if (scene === 2) {
                 drawGainScope();
                 drawMeters();
             } else if (scene === 3) drawMatrix();
+            else if (scene === 4) {
+                drawXfade();
+                drawTracks();
+            }
 
             if ((frameCount & TELEM_MASK) === 0) {
                 const total = engine.activeCount();
@@ -2032,6 +2397,7 @@
                 $vActive.textContent = total + ' voices';
                 if (scene === 0) renderQueue();
                 if (scene === 3) refreshHandleStatuses();
+                if (scene === 4) updateMusicTelemetry();
                 if (logDirty) {
                     logDirty = 0;
                     renderLog();
@@ -2062,6 +2428,19 @@
         $cCollapsed.textContent = cCollapsed;
         $cDropped.textContent = cDropped;
         $cDropped.className = cDropped > 0 ? 'warn' : '';
+    }
+
+    function updateMusicTelemetry() {
+        $musicHint.textContent = engine.unlocked().peek() ? 'unlocked' : 'unlock on scene 1 first';
+        for (let i = 0; i < TRACK_IDS.length; i++) {
+            const id = TRACK_IDS[i];
+            const posSig = engine.trackPosition(id);
+            const durSig = engine.trackDuration(id);
+            const pos = posSig ? posSig.peek() : 0;
+            const dur = (durSig ? durSig.peek() : 0) || durById.get(id) || 0;
+            posText[i] = pos.toFixed(1) + ' / ' + dur.toFixed(1) + 's';
+        }
+        $powerNow.textContent = 'power ' + xfPower[(xfHead - 1) & TRACE_MASK].toFixed(2);
     }
 
     // ---------------------------------------------------------------------------
@@ -2172,6 +2551,73 @@
 
     $bOverrun.addEventListener('click', () => {
         for (let i = 0; i < 10; i++) firePlay('laser', 0.7, (i / 9) * 2 - 1, 0.9 + i * 0.03);
+    });
+
+    document.querySelectorAll('[data-track-play]').forEach((b) => {
+        b.addEventListener('click', () => {
+            if (!engine) return;
+            engine.playTrack(b.dataset.trackPlay, {fadeIn: xfadeMs});
+            musicGuard(b.dataset.trackPlay);
+        });
+    });
+    document.querySelectorAll('[data-track-stop]').forEach((b) => {
+        b.addEventListener('click', () => {
+            if (engine) engine.stopTrack(b.dataset.trackStop, {fade: xfadeMs});
+        });
+    });
+    document.querySelectorAll('[data-track-pause]').forEach((b) => {
+        b.addEventListener('click', () => {
+            if (engine) engine.pauseTrack(b.dataset.trackPause);
+        });
+    });
+    document.querySelectorAll('[data-track-resume]').forEach((b) => {
+        b.addEventListener('click', () => {
+            if (!engine) return;
+            engine.resumeTrack(b.dataset.trackResume);
+            musicGuard(b.dataset.trackResume);
+        });
+    });
+
+    // playTrack is a silent no-op while the context is locked - music is scene-scale, so
+    // unlike SFX it is not queued. Say so, instead of leaving a dead button.
+    function musicGuard(id) {
+        if (!engine.unlocked().peek()) {
+            $musicHint.textContent = 'locked: playTrack does not queue';
+            logPush('drop', 'playTrack(' + id + ') ignored: context locked');
+        }
+    }
+
+    $sXfade.addEventListener('input', () => {
+        xfadeMs = $sXfade.value | 0;
+        $oXfade.textContent = xfadeMs + 'ms';
+    });
+
+    // Seed from the control, not from a number typed twice.
+    xfadeMs = $sXfade.value | 0;
+    $oXfade.textContent = xfadeMs + 'ms';
+
+    $bXfBoss.addEventListener('click', () => {
+        if (!engine) return;
+        engine.crossfade('theme', 'boss', xfadeMs);
+        logPush('play', 'crossfade theme -> boss over ' + xfadeMs + 'ms');
+        musicGuard('boss');
+    });
+    $bXfTheme.addEventListener('click', () => {
+        if (!engine) return;
+        engine.crossfade('boss', 'theme', xfadeMs);
+        logPush('play', 'crossfade boss -> theme over ' + xfadeMs + 'ms');
+        musicGuard('theme');
+    });
+    $bExclusive.addEventListener('click', () => {
+        if (!engine) return;
+        engine.playExclusive('boss', {fade: xfadeMs});
+        logPush('play', 'playExclusive(boss): other tracks on the music bus fade out');
+        musicGuard('boss');
+    });
+    $bStopMusic.addEventListener('click', () => {
+        if (!engine) return;
+        engine.stopBus('music', {fade: xfadeMs});
+        logPush('stop', 'stopBus(music): the voices and the tracks on that bus');
     });
 
     window.addEventListener('keydown', (e) => {

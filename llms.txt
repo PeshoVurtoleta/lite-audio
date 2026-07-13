@@ -1,5 +1,5 @@
 # @zakkster/lite-audio
-> Zero-GC reactive Web Audio engine. Signal-driven buses, ABA-safe voice handles, unlock queue, per-bus AudioPool. SFX layer over @zakkster/lite-audio-pool.
+> Zero-GC reactive Web Audio engine. Signal-driven buses, ABA-safe voice handles, unlock queue, per-bus AudioPool, streaming music tracks with equal-power crossfade.
 
 ## Install
 npm i @zakkster/lite-audio @zakkster/lite-signal @zakkster/lite-audio-pool
@@ -9,44 +9,49 @@ import { LiteAudio } from '@zakkster/lite-audio';
 
 ## Key Facts
 - Zero deps of its own; two peers: @zakkster/lite-signal (^1.3), @zakkster/lite-audio-pool (^1.1)
-- Signal-driven control surface: bus volumes, master mute, ctx state, per-sound load state are all reactive
+- Signal-driven control surface: bus volumes, master mute, ctx state, per-sound and per-track load state are all reactive
 - Bus writes go through setTargetAtTime for click-free transitions (10 ms time constant)
 - Pre-unlock play() calls are queued (bounded, latest-per-sound), flushed on first user gesture
 - iOS/Safari unlock: silent-buffer pulse + resume() on touchstart/touchend/mousedown/keydown (capture phase, exact set the manager uses)
 - Handles 'interrupted' state (iOS phone-call scenario) the same as 'suspended'
 - Master mute persists to localStorage under 'lite_audio_muted' (byte-identical to lite-audio-manager for migration)
-- One AudioPool per bus (pool v1.1.0+ output param + per-play buffer override)
-- Positional hot path: play(soundId, volume, pan, pitch) - no options object per call
-- Handles are bus-tagged: busIndex * 2^32 + poolHandle. Pool handles collide across buses (every pool starts at channel 0 / generation 0), so the tag is what makes stop() name one voice
-- v1.0.0 covers SFX only; music streaming layer (MediaElementAudioSourceNode) lands in v1.1.0
+- One AudioPool per bus for SFX (pool v1.1.0+ output param + per-play buffer override)
+- Music tracks stream via MediaElementAudioSourceNode routed through the same bus graph
+- Positional hot path for SFX: play(soundId, volume, pan, pitch) - no options object per call
+- SFX handles are bus-tagged: busIndex * 2^32 + poolHandle. Raw pool handles collide across buses (every pool starts at channel 0 / generation 0), so the tag is what makes stop() name one voice
+- Music tracks are singletons addressed by name, not handle - stopTrack('menu_bg') not stop(handle)
+- v1.1.0 ships SFX + music (crossfade, exclusive, unique, loop points). Ducking / snapshots / auto-suspend are v1.2.0; Howler-shim compat subpath is v2.0.0.
 
 ## Quick Start
 ```js
 import { LiteAudio } from '@zakkster/lite-audio';
 
-const audio = new LiteAudio({ buses: ['sfx', 'ui', 'voice'] });
-await audio.init();                       // creates AudioContext
+const audio = new LiteAudio();            // buses default to sfx/ui/voice/music
+await audio.init();
+
+// SFX
 await audio.defineSounds({
     laser: { src: ['/laser.opus', '/laser.mp3'], bus: 'sfx' },
-    hit:   { src: ['/hit.wav'], bus: 'sfx', pitchVar: 0.15 },
     click: { src: ['/click.mp3'], bus: 'ui' },
 });
-
-// Fires immediately if unlocked; queued and flushed on first gesture otherwise.
 const h = audio.play('laser', 0.8, 0.0, 1.0);
 audio.stop(h);
-audio.isPlaying(h);                       // false once stolen, stopped, or played out
+
+// Music
+await audio.defineTracks({
+    menu:     { src: ['/menu.mp3'], bus: 'music' },
+    gameplay: { src: ['/gameplay.mp3'], bus: 'music',
+                loop: true, loopStart: 4.5, loopEnd: 92 },
+});
+audio.playTrack('menu', { fadeIn: 400 });
+audio.crossfade('menu', 'gameplay', 500);
+audio.stopTrack('gameplay', { fade: 300 });
 
 // Reactive readouts
 audio.unlocked();                         // ReadSignal<boolean>
-audio.ctxState();                         // ReadSignal<'suspended'|'running'|'interrupted'|'closed'>
-audio.loadState('laser');                 // ReadSignal<'idle'|'loading'|'ready'|'error'>
-audio.busVolume('sfx');                   // ReadSignal<number>
-
-// Writes
-audio.setBusVolume('sfx', 0.5);
-audio.setBusMuted('ui', true);
-audio.setMuted(true);                     // master, persists to localStorage
+audio.trackPlaying('gameplay');           // ReadSignal<boolean>
+audio.trackPosition('gameplay');          // ReadSignal<number>, throttled ~10 Hz
+audio.setMuted(true);                     // master mute, persists to localStorage
 
 audio.destroy();                          // idempotent
 ```
@@ -57,50 +62,56 @@ audio.destroy();                          // idempotent
 ```
 new LiteAudio(opts?)
 ```
-- `opts.buses?: string[]` - defaults ['sfx', 'ui', 'voice']. 'master' is implicit.
-- `opts.poolCapacity?: number` - defaults 32.
-- `opts.queueLimit?: number` - defaults 32.
+- `opts.buses?: string[]` - defaults ['sfx', 'ui', 'voice', 'music']. 'master' is implicit.
+- `opts.poolCapacity?: number` - defaults 32 (SFX per bus).
+- `opts.queueLimit?: number` - defaults 32 (pre-unlock queue).
 - `opts.mutedStorageKey?: string` - defaults 'lite_audio_muted'.
 - `opts.fetch?, opts.window?, opts.document?` - test injectables.
+- `opts.setTimeout?, opts.clearTimeout?` - test injectables for stopTrack teardown.
 
 ### async init(ctx?): Promise<void>
 Wires the engine to an AudioContext. Creates one via globalThis.AudioContext if none passed. Sets up master gain, bus gains, master-mute effect, per-bus volume+mute effects, statechange listener, unlock listeners.
 
-### async defineSounds(config): Promise<void>
-Fetches and decodes every sound in the config. Config shape:
-```
-{ [soundId]: { src: string[], bus?: string, volume?: number, pitchVar?: number } }
-```
-Resolves after every sound has settled. Load state per sound is a reactive signal readable via loadState(soundId). Pools are built (or rebuilt) once per touched bus at the end.
+### SFX (v1.0.0)
 
-### play(soundId, volume?, pan?, pitch?): number
-Positional hot path. Returns a handle >= 0 on success, -1 on any skip (unknown sound, not-yet-ready sound, context locked). Locked plays are queued (latest-per-sound, bounded by queueLimit) and flushed on unlock.
+async defineSounds(config): fetch + decodeAudioData every sound. Config `{ [id]: { src: string[], bus?, volume?, pitchVar? } }`.
+play(soundId, volume?, pan?, pitch?): positional hot path, returns handle >= 0 or -1.
+playOpts(soundId, opts?): sugar with pitchVar resolution.
+stop(handle): stops a specific play. The handle carries its bus, so stop() resolves the owning pool in O(1) and can never reach across a bus boundary.
+isPlaying(handle): boolean. busOf(handle): string|null. activeCount(busName?): live SFX voices per bus or engine-wide.
+stopBus(name, opts?), stopAll(opts?): bus- and engine-wide stops. Both stop SFX voices AND fade out any music track routed to those buses (opts.fade, default 200ms).
+loadState(id): ReadSignal<'idle'|'loading'|'ready'|'error'>.
 
-### playOpts(soundId, opts?): number
-Sugar over play() with pitchVar resolution: `pitch = 1 + (rand*2-1)*pitchVar`.
+### Music (v1.1.0)
 
-### stop(handle): void
-Stops a specific play. Stale handles (channel stolen or already ended) are silent no-ops. The handle carries its bus, so stop() resolves the owning pool in O(1) and can never reach across a bus boundary.
+async defineTracks(config): fetch + attach <audio> elements for streaming. Config `{ [name]: { src: string[], bus?, volume?, loop?, loopStart?, loopEnd? } }`.
+playTrack(name, opts?): starts or resumes. Opts `{ fadeIn?, position?, restart? }`. Idempotent unless restart.
+stopTrack(name, { fade? }): fades out, pauses element after fade. Playing signal flips false immediately.
+pauseTrack(name) / resumeTrack(name): position preserved.
+crossfade(from, to, durationMs): equal-power both sides. Either side can be null.
+playExclusive(name, opts?): bus-scoped - fades other playing tracks on same bus.
+playUnique(name, thresholdMs = 100): timestamp gate, works on sounds AND tracks. Returns a handle for a sound, -2 for a track (singleton, name-addressed), -1 on rejection or unknown. Never 0 for a track - 0 is a real handle.
+trackLoadState(name), trackPlaying(name), trackPosition(name), trackDuration(name): per-track signals.
 
-### isPlaying(handle): boolean, busOf(handle): string|null, activeCount(busName?): number
-Liveness of one voice, the bus that issued a handle, and the live voice count per bus or engine-wide.
+### Crossfade semantics
+- Equal-power curves precomputed at module load (128 samples each: EQ_POWER_IN, EQ_POWER_OUT). Per-call scaled Float32Array per side is the only allocation, off the hot path (scene transitions).
+- Interruption (case c): only tracks named in the new call are touched. A track fading out from a previous crossfade keeps its schedule. A track being retargeted reads its current xfadeGain value and starts an equal-power ramp scaled from that value - no discontinuities.
+- Graph: <audio> -> MediaElementSource -> xfadeGain (0..1 crossfade knob) -> volumeGain (baseline volume) -> bus.gain
 
-### stopBus(busName): void, stopAll(): void
-Bus- and engine-wide stops.
-
-### setBusVolume(name, v), setBusMuted(name, m), setMuted(state)
-Signal setters. Every write schedules a setTargetAtTime on the affected GainNode with a 10 ms time constant.
+### Bus + master
+setBusVolume(name, v), setBusMuted(name, m), setMuted(state): signal setters. Every write schedules setTargetAtTime with a 10 ms time constant.
 
 ### Reactive readables
-`ctxState() : ReadSignal<CtxState>`
+`ctxState() : ReadSignal<'suspended'|'running'|'interrupted'|'closed'>`
 `unlocked() : ReadSignal<boolean>`
 `muted() : ReadSignal<boolean>`
 `loadState(id) : ReadSignal<LoadState> | undefined`
+`trackLoadState(name), trackPlaying(name), trackPosition(name), trackDuration(name) : ReadSignal | undefined`
 `busVolume(name), busMuted(name) : ReadSignal | undefined`
 `busNode(name) : GainNode | undefined`
 `masterNode() : GainNode | null`
 
 ### destroy(): void
-Stops every voice, tears down pools (which disconnect their nodes), disposes signal effects, aborts unlock/lifecycle controllers, releases references. Idempotent. Does not close the AudioContext.
+Stops every voice, tears down SFX pools, tears down every track (pauses element, disconnects source + gains, removes timeupdate/ended listeners, cancels pending pause timers), disposes signal effects, aborts unlock/lifecycle controllers, releases references. Idempotent. Does not close the AudioContext.
 
 See Audio.js source for full inline documentation.

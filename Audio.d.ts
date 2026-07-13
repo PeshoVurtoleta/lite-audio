@@ -31,14 +31,49 @@ export interface SoundConfig {
     pitchVar?: number;
 }
 
+export interface TrackConfig {
+    /** Source URL list, ordered by preference. First supported extension wins. */
+    src: string[];
+    /** Bus to route this track to. Defaults to 'music'. Must exist in `opts.buses`. */
+    bus?: string;
+    /** Baseline volume for this track (0..1). Independent of the crossfade knob. */
+    volume?: number;
+    /** Loop this track when it ends (or when loopEnd is reached, if set). */
+    loop?: boolean;
+    /** Custom loop start (seconds). Requires loopEnd; the native element.loop is disabled. */
+    loopStart?: number;
+    /** Custom loop end (seconds). When currentTime crosses this, seeks to loopStart. */
+    loopEnd?: number;
+}
+
+export interface PlayTrackOptions {
+    /** Fade-in duration in ms. Default 0 (snap to full). */
+    fadeIn?: number;
+    /** Seek to this position (seconds) before playback. */
+    position?: number;
+    /** If the track is already playing, seek to 0 and continue. Default false (no-op). */
+    restart?: boolean;
+}
+
+export interface StopTrackOptions {
+    /** Fade-out duration in ms. Default 200. */
+    fade?: number;
+}
+
+export interface PlayExclusiveOptions extends PlayTrackOptions {
+    /** Fade-out duration for siblings on the same bus, ms. Default 200. */
+    fade?: number;
+}
+
 export interface LiteAudioOptions {
     /**
      * User-facing bus names. Do not include 'master' - it is always the top
      * of the graph and is controlled via setMuted() / muted().
+     * Defaults to ['sfx', 'ui', 'voice', 'music'].
      */
     buses?: string[];
 
-    /** Voices per bus pool. Defaults to 32. */
+    /** Voices per bus pool (SFX). Defaults to 32. */
     poolCapacity?: number;
 
     /**
@@ -59,6 +94,10 @@ export interface LiteAudioOptions {
 
     /** Injectable for tests. Defaults to globalThis.document. */
     document?: any;
+
+    /** Injectable for tests. Defaults to globalThis.setTimeout / clearTimeout. */
+    setTimeout?: (cb: () => void, ms: number) => any;
+    clearTimeout?: (id: any) => void;
 }
 
 export class LiteAudio {
@@ -80,9 +119,9 @@ export class LiteAudio {
      * Locked-context plays are queued and flushed on the first user gesture (D3).
      *
      * The handle is `busIndex * 2^32 + poolHandle`: a plain number, exact well
-     * inside 2^53, opaque to callers. The bus tag is what makes a handle name one
-     * voice engine-wide - every bus's pool counts generations from zero on its own,
-     * so the raw pool handles collide across buses by construction.
+     * inside 2^53, opaque to callers. Every bus's pool counts channels and
+     * generations from zero on its own, so the raw pool handles collide across
+     * buses by construction - the bus tag is what makes a handle name one voice.
      */
     play(soundId: string, volume?: number, pan?: number, pitch?: number): number;
 
@@ -106,14 +145,73 @@ export class LiteAudio {
     /** Name of the bus that issued this handle, or null. */
     busOf(handle: number): string | null;
 
-    /** Voices sounding on a bus, or across every bus when called with no argument. */
+    /**
+     * SFX voices sounding on a bus, or across every bus with no argument.
+     * Tracks are not voices and are not counted - ask trackPlaying(name).
+     */
     activeCount(busName?: string): number;
 
-    /** Stop every voice on a named bus. */
-    stopBus(busName: string): void;
+    /** Stop every voice on a named bus, and fade out any track routed there. */
+    stopBus(busName: string, opts?: { fade?: number }): void;
 
-    /** Stop every voice across every bus. */
-    stopAll(): void;
+    /** Stop every voice on every bus, and fade out every playing track. */
+    stopAll(opts?: { fade?: number }): void;
+
+    // ---------- Music layer (v1.1.0) ---------------------------------------
+
+    /**
+     * Register music tracks. Streaming via MediaElementAudioSourceNode.
+     * Same async loader shape as defineSounds; per-track loadState signal
+     * transitions idle -> loading -> ready | error.
+     */
+    defineTracks(config: Record<string, TrackConfig>): Promise<void>;
+
+    /**
+     * Start (or resume) a track. Idempotent per name unless `restart: true`.
+     * Silent no-op if the context is locked or the track is not ready.
+     */
+    playTrack(name: string, opts?: PlayTrackOptions): void;
+
+    /**
+     * Fade a track out. The playing signal flips false immediately; the
+     * <audio> element is paused after the fade completes.
+     */
+    stopTrack(name: string, opts?: StopTrackOptions): void;
+
+    /** Pause without losing position. */
+    pauseTrack(name: string): void;
+
+    /** Resume from paused state. Position (element.currentTime) preserved. */
+    resumeTrack(name: string): void;
+
+    /**
+     * Equal-power crossfade between two tracks. Either side may be null.
+     * Case (c) interruption semantics: only tracks named in this call are
+     * touched. A track fading out from a previous crossfade keeps its
+     * schedule; a track being retargeted reads its current xfadeGain value
+     * and scales the equal-power curve from there.
+     */
+    crossfade(fromName: string | null, toName: string | null, durationMs?: number): void;
+
+    /** Start `name` and fade every other playing track on its bus. */
+    playExclusive(name: string, opts?: PlayExclusiveOptions): void;
+
+    /**
+     * Play `name` (sound OR track) only if the last play attempt for the
+     * same name was more than `thresholdMs` ago. Ported from the manager.
+     *
+     * Returns a voice handle for a sound, `-2` for a track (music is a singleton,
+     * addressed by name), and `-1` on threshold rejection or unknown name. It never
+     * returns 0 for a track: 0 is a real handle (bus 0, channel 0, generation 0), and
+     * passing it to stop() would kill an unrelated SFX voice.
+     */
+    playUnique(name: string, thresholdMs?: number): number;
+
+    /** Per-track signals. Undefined for unknown track name. */
+    trackLoadState(name: string): ReadSignal<LoadState> | undefined;
+    trackPlaying(name: string):   ReadSignal<boolean> | undefined;
+    trackPosition(name: string):  ReadSignal<number> | undefined;
+    trackDuration(name: string):  ReadSignal<number> | undefined;
 
     // ---------- Bus + master controls --------------------------------------
     setBusVolume(busName: string, volume: number): void;

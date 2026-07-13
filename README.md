@@ -54,7 +54,18 @@ await audio.defineSounds({
 // flushed on the first touchstart / mousedown / keydown otherwise. No polling,
 // no "waiting for unlock" ceremony in the caller.
 const handle = audio.play('laser', 0.8, 0.0, 1.0);
-audio.stop(handle);
+audio.stop(handle);                       // stale handles are silent no-ops
+audio.isPlaying(handle);                  // false once stolen, stopped, or played out
+
+// Music: streamed, not decoded. Singletons, addressed by name.
+await audio.defineTracks({
+    menu: { src: ['/menu.mp3'],  bus: 'music', loop: true },
+    boss: { src: ['/boss.mp3'],  bus: 'music', loop: true, loopStart: 8, loopEnd: 96 },
+});
+
+audio.playTrack('menu', { fadeIn: 600 });
+audio.crossfade('menu', 'boss', 800);     // equal-power, both sides, no power dip
+audio.trackPosition('boss');              // ReadSignal<number>, throttled to 10 Hz
 
 // Reactive state - subscribe with lite-signal's effect() for UI hookup.
 audio.unlocked();                         // ReadSignal<boolean>
@@ -64,8 +75,27 @@ audio.busVolume('sfx');                   // ReadSignal<number>
 audio.setBusVolume('sfx', 0.5);           // schedules setTargetAtTime, click-free
 audio.setMuted(true);                     // master mute, persists to localStorage
 
+audio.stopAll();                          // every voice AND every track
 audio.destroy();                          // idempotent, disconnects the graph
 ```
+
+## Handles
+
+`play()` returns a **bus-tagged** handle: `busIndex * 2^32 + poolHandle`. Treat it
+as opaque — get it from `play()`, pass it to `stop()` / `isPlaying()`.
+
+The tag is not decoration. A pool handle is a full `uint32` — `[gen:24][channel:8]`,
+no spare bits — and every bus runs its own `AudioPool` counting channels and
+generations from zero. So the first play on *every* bus hands back the identical
+raw handle, `0x00000000`. Without the tag, `stop()` on an `sfx` handle also killed
+whatever sat on channel 0 of `ui`, `voice`, and `music`. The generation counter
+cannot prevent that: it is a recycle counter, not a namespace. With the tag,
+`stop()` resolves the owning pool in O(1) and cannot cross a bus boundary.
+
+Handles stay plain numbers, exact well inside `2^53`, so `-1` still means "no voice"
+(unknown sound, not loaded, or context locked). `playUnique()` on a *track* returns
+`-2`: tracks are name-addressed singletons with no handle, and `0` was never
+available as a "nothing" value — it is a real voice.
 
 ## Why not Howler?
 
@@ -111,6 +141,39 @@ bus-tagged handles (`busIndex * 2^32 | (gen << 8) | channel`); a stale
 listeners behind an `AbortController`), plus a bounded pre-unlock play queue
 so a call fired before the first user gesture does not vanish.
 
+## Music layer
+
+SFX are decoded into memory and fired through a pool; a five-minute track would be
+~50 MB of PCM for that privilege. Tracks are streamed instead —
+`MediaElementAudioSourceNode` over an `<audio>` element — and routed into the *same*
+bus graph, so one master mute and one set of faders govern both.
+
+Each track is a singleton addressed by name, with its own two-gain chain:
+
+```
+<audio> -> MediaElementSource -> xfadeGain -> volumeGain -> bus.gain -> master
+```
+
+`xfadeGain` carries crossfade curves (0..1); `volumeGain` carries the track's
+baseline volume. They are separate on purpose: a crossfade must not clobber the
+mix, and changing the mix mid-crossfade must not fight the curve.
+
+| Call | Does |
+| --- | --- |
+| `playTrack(name, { fadeIn?, position?, restart? })` | Start or restart. Idempotent. No-op while locked — music is scene-scale, so it is *not* queued the way SFX are. |
+| `stopTrack(name, { fade? })` | Equal-power fade out, then pause the element so the browser stops decoding. `playing` flips to `false` at once; the tail is an audio detail, not a state a HUD should show. |
+| `pauseTrack(name)` / `resumeTrack(name)` | Pause without losing position. `resumeTrack()` also restores a gain that an earlier `stopTrack()` faded away — otherwise it would decode, report itself playing, and be inaudible. |
+| `crossfade(from, to, ms)` | Equal-power both sides. Either side may be `null`. A retarget mid-fade starts from where the gain actually is, so there is no discontinuity. |
+| `playExclusive(name, { fade? })` | Start `name`, fade every other playing track **on the same bus**. Other buses are untouched. |
+| `stopBus(name, { fade? })` / `stopAll({ fade? })` | Stop the pool voices *and* fade the tracks routed there. Once music lives on a bus, "stop the bus" has to mean the bus. |
+
+Loop points: `loop: true` alone uses the native `element.loop`. Add `loopEnd` and the
+engine takes over — `timeupdate` seeks back to `loopStart` on crossing it, and the
+native loop is switched off (it would jump to `0`, not to `loopStart`). Note that
+`timeupdate` fires roughly four times a second, so a custom loop can overshoot by up
+to ~250 ms. For a tight musical loop, prefer an asset whose file boundaries *are* the
+loop.
+
 ## Signal readouts (the whole reactive surface)
 
 | Signal | Read via | Notes |
@@ -121,6 +184,10 @@ so a call fired before the first user gesture does not vanish.
 | Bus volume | `audio.busVolume(name)` | 0..1 (or higher; not clamped) |
 | Bus mute | `audio.busMuted(name)` | Independent of master mute |
 | Load state | `audio.loadState(id)` | `'idle' \| 'loading' \| 'ready' \| 'error'` |
+| Track load state | `audio.trackLoadState(name)` | Same four states |
+| Track playing | `audio.trackPlaying(name)` | Flips `false` the instant a stop is *asked for*, not when the fade ends |
+| Track position | `audio.trackPosition(name)` | Seconds, written at most every 100 ms |
+| Track duration | `audio.trackDuration(name)` | `0` until `loadedmetadata` lands |
 
 All readable via `signal()` (calling), `signal.peek()` (untracked read), or
 inside a `computed()` / `effect()`.
@@ -129,13 +196,15 @@ inside a `computed()` / `effect()`.
 
 ```js
 new LiteAudio({
-    buses:            ['sfx', 'ui', 'voice'],   // user-facing buses
+    buses:            ['sfx', 'ui', 'voice', 'music'],  // user-facing buses
     poolCapacity:     32,                        // voices per bus pool
     queueLimit:       32,                        // bound on pre-unlock queue
     mutedStorageKey:  'lite_audio_muted',        // manager parity default
     fetch:            globalThis.fetch,          // injectable for tests
     window:           globalThis.window,         // ditto
     document:         globalThis.document,       // ditto
+    setTimeout:       globalThis.setTimeout,     // ditto (deferred track pause)
+    clearTimeout:     globalThis.clearTimeout,   // ditto
 });
 ```
 
@@ -156,19 +225,26 @@ notes for that.
 npm test
 ```
 
-32 tests across 9 suites, covering unlock state machine (including
-`'interrupted'`), loader fallback + error, bus signal writes as
-`setTargetAtTime` on a mock AudioContext, pool delegation (steal, generation
-no-op on stale handles, stopBus scope), unlock queue flush semantics
-(latest-per-sound, bounded), and destroy idempotency + listener detachment.
+75 tests across 18 suites. The unlock state machine (including `'interrupted'`),
+loader fallback + error, bus writes as `setTargetAtTime`, pool delegation (steal,
+generation no-op on stale handles, bus scope), unlock queue semantics
+(latest-per-sound, bounded), destroy idempotency — plus the whole music layer
+(`test/Tracks.test.js`) and the bus-handle namespace (`test/BusHandles.test.js`).
 
-The mock harness (`test/mock-ctx.js`) records every `AudioParam` scheduled
-event into an inspectable `.events` array, runs a real context state machine
-(all four states — `suspended`, `running`, `interrupted`, `closed`), and
-mocks `fetch` + `decodeAudioData` with length-hint payloads so tests can
-distinguish sounds deterministically. This harness is the D8 foundation the
-next roadmap sessions will reuse for the music layer, ducking, and parity
-certification.
+The mock harness (`test/mock-ctx.js`) records every `AudioParam` scheduled event
+into an inspectable `.events` array **and settles `.value` on whatever the
+automation is heading for**. That second half matters more than it sounds: a
+harness that only records schedules can prove a fade-out was *scheduled* while
+saying nothing about whether the gain ended up silent — and "scheduled a fade-out"
+plus "still audible" is exactly the shape of a real bug this suite now catches. It
+also runs a real context state machine (all four states), mocks `fetch` +
+`decodeAudioData` with length-hint payloads, and hands out `<audio>` elements and
+a manual timer scheduler so the deferred pause behind a track fade is an assertion
+rather than a race.
+
+Not covered, and honestly so: `pickSupportedSrc()` probes the real `document` /
+`Audio` globals rather than the injected ones, so under `node:test` it always takes
+the "first URL wins" branch. The `canPlayType` path is unexercised.
 
 ## License
 

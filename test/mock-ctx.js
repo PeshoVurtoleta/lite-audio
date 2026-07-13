@@ -18,10 +18,21 @@ export function mockParam(defaultValue = 0) {
         value: defaultValue,
         events: [],
         cancelScheduledValues(t) { p.events.push(['cancel', t]); return p; },
-        setValueAtTime(v, t) { p.events.push(['set', v, t]); return p; },
-        linearRampToValueAtTime(v, t) { p.events.push(['linearRamp', v, t]); return p; },
-        exponentialRampToValueAtTime(v, t) { p.events.push(['expRamp', v, t]); return p; },
-        setTargetAtTime(v, t, tc) { p.events.push(['target', v, t, tc]); return p; },
+        // Every scheduling call records its shape AND settles `.value` on the value
+        // the automation is heading for. Recording alone is not enough: it lets a
+        // test prove a fade was scheduled while saying nothing about where the gain
+        // ended up, and "scheduled a fade-out" plus "still audible" is exactly the
+        // shape of the resumeTrack bug. Tests that care about the ramp itself read
+        // .events; tests that care about the outcome read .value.
+        setValueAtTime(v, t) { p.events.push(['set', v, t]); p.value = v; return p; },
+        linearRampToValueAtTime(v, t) { p.events.push(['linearRamp', v, t]); p.value = v; return p; },
+        exponentialRampToValueAtTime(v, t) { p.events.push(['expRamp', v, t]); p.value = v; return p; },
+        setTargetAtTime(v, t, tc) { p.events.push(['target', v, t, tc]); p.value = v; return p; },
+        setValueCurveAtTime(curve, t, dur) {
+            p.events.push(['curve', curve, t, dur]);
+            p.value = curve[curve.length - 1];
+            return p;
+        },
     };
     return p;
 }
@@ -65,6 +76,88 @@ export function mockBufferSource() {
     return n;
 }
 
+/**
+ * MediaElementAudioSourceNode stand-in. Holds the element it was created from so a
+ * test can assert the graph was wired to the right track.
+ */
+export function mockMediaElementSource(element) {
+    const n = baseNode('mediaElementSource');
+    n.mediaElement = element;
+    return n;
+}
+
+/**
+ * <audio> element stand-in. Records play/pause/load calls and its listeners so a
+ * test can fire 'timeupdate' / 'ended' / 'loadedmetadata' by hand, and can prove
+ * teardown actually released the stream rather than merely pausing it.
+ */
+export function mockAudioElement(src = '') {
+    const listeners = new Map();
+    const el = {
+        src,
+        preload: '',
+        crossOrigin: '',
+        loop: false,
+        paused: true,
+        currentTime: 0,
+        duration: 128,
+        playCalls: 0,
+        pauseCalls: 0,
+        loadCalls: 0,
+        srcReleased: false,
+
+        addEventListener(type, cb) {
+            if (!listeners.has(type)) listeners.set(type, new Set());
+            listeners.get(type).add(cb);
+        },
+        removeEventListener(type, cb) { listeners.get(type)?.delete(cb); },
+        play() { el.paused = false; el.playCalls++; return Promise.resolve(); },
+        pause() { el.paused = true; el.pauseCalls++; },
+        removeAttribute(name) { if (name === 'src') { el.src = ''; el.srcReleased = true; } },
+        load() { el.loadCalls++; },
+
+        _fire(type) { for (const cb of [...(listeners.get(type) || [])]) cb({ target: el }); },
+        _listenerCount(type) { return listeners.get(type)?.size || 0; },
+    };
+    return el;
+}
+
+/**
+ * Document stand-in for the track loader. Every created <audio> lands in
+ * `.created` in order, so a test can assert one element per track.
+ */
+export function mockDocument() {
+    const doc = {
+        hidden: false,
+        created: [],
+        createElement(tag) {
+            if (tag !== 'audio') throw new Error('mockDocument: unexpected <' + tag + '>');
+            const el = mockAudioElement();
+            doc.created.push(el);
+            return el;
+        },
+        addEventListener() {},
+        removeEventListener() {},
+    };
+    return doc;
+}
+
+/**
+ * Manual timer scheduler for opts.setTimeout / opts.clearTimeout. stopTrack defers
+ * the <audio> pause until after the fade; with a real timer that is a race, and with
+ * this it is an assertion.
+ */
+export function mockScheduler() {
+    const timers = new Map();
+    let next = 1;
+    return {
+        setTimeout(cb) { const id = next++; timers.set(id, cb); return id; },
+        clearTimeout(id) { timers.delete(id); },
+        pending() { return timers.size; },
+        flush() { for (const [id, cb] of [...timers]) { timers.delete(id); cb(); } },
+    };
+}
+
 export function mockAudioBuffer(numberOfChannels, length, sampleRate) {
     return {
         numberOfChannels,
@@ -104,6 +197,7 @@ export function createMockContext({ sampleRate = 44100, state = 'suspended' } = 
         createStereoPanner: () => mockPanner(),
         createBufferSource: () => mockBufferSource(),
         createBuffer: (ch, len, sr) => mockAudioBuffer(ch, len, sr),
+        createMediaElementSource: (el) => mockMediaElementSource(el),
 
         async resume() {
             if (ctxState === 'closed') throw new Error('Cannot resume closed context');

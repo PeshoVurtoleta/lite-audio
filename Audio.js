@@ -35,6 +35,15 @@ const RAMP_TC = 0.01;
 const BUS_STRIDE = 4294967296;   // 2^32
 
 /**
+ * playUnique() returns a handle for a sound. Tracks have no handle - they are
+ * singletons addressed by name - so it needs a way to say "the track started"
+ * that is not a number stop() would act on. It cannot be 0: that is a perfectly
+ * good handle (bus 0, channel 0, generation 0). Negative values are inert to
+ * stop(), and -1 already means "skipped", so a track start reports -2.
+ */
+const TRACK_STARTED = -2;
+
+/**
  * The unlock queue is bounded to bound worst-case memory: if a spammy loop
  * calls play() a thousand times before the first user gesture, we do not
  * want that to become a thousand-voice burst on unlock. Latest-per-sound
@@ -68,6 +77,45 @@ function writeStorage(key, value) {
         localStorage.setItem(key, String(value));
     } catch { /* Safari private mode / storage disabled */ }
 }
+
+/**
+ * Equal-power crossfade curves, precomputed once at module load. Both curves
+ * are 128 samples over t in [0, 1]. Scaled per crossfade to whatever the
+ * outgoing gain's current value is (so a mid-crossfade retarget starts from
+ * where the track actually is, not from a hardcoded 1.0). Allocations here
+ * are one Float32Array per crossfade side - a scene transition, not a hot
+ * path. The pool underneath still does the zero-GC work.
+ */
+const CROSSFADE_SAMPLES = 128;
+const EQ_POWER_IN = new Float32Array(CROSSFADE_SAMPLES);
+const EQ_POWER_OUT = new Float32Array(CROSSFADE_SAMPLES);
+for (let i = 0; i < CROSSFADE_SAMPLES; i++) {
+    const t = i / (CROSSFADE_SAMPLES - 1);
+    EQ_POWER_IN[i] = Math.sin(t * Math.PI / 2);
+    EQ_POWER_OUT[i] = Math.cos(t * Math.PI / 2);
+}
+
+/**
+ * Scale an equal-power curve to a desired range [start, start+delta]. Used
+ * for both fade-in (start=current, delta=target-current) and fade-out
+ * (start=0, delta=current), and correctly handles mid-crossfade retargets
+ * where the current xfadeGain value is somewhere between 0 and 1.
+ */
+function scaleCurve(base, delta, start) {
+    const out = new Float32Array(base.length);
+    for (let i = 0; i < base.length; i++) out[i] = start + base[i] * delta;
+    return out;
+}
+
+/** Position signal write throttle: >= 100 ms of ctx time between writes. */
+const POSITION_WRITE_INTERVAL = 0.1;
+
+/** Default fade durations in seconds (converted to ms at the API boundary). */
+const DEFAULT_TRACK_FADE_MS = 200;
+
+/** Gain restore ramp used by resumeTrack(). Long enough not to click, short
+ *  enough that "resume" still feels immediate. */
+const RESUME_FADE_MS = 40;
 
 // ---------- Loader ---------------------------------------------------------
 
@@ -140,13 +188,17 @@ export class LiteAudio {
      * @param {Object} [opts.document] - Injectable for tests. Defaults to globalThis.document.
      */
     constructor(opts = {}) {
-        this._busNames = opts.buses || ['sfx', 'ui', 'voice'];
+        this._busNames = opts.buses || ['sfx', 'ui', 'voice', 'music'];
         this._poolCapacity = opts.poolCapacity ?? 32;
         this._queueLimit = opts.queueLimit ?? DEFAULT_QUEUE_LIMIT;
         this._mutedKey = opts.mutedStorageKey ?? MUTED_STORAGE_KEY;
         this._fetch = opts.fetch || (typeof fetch !== 'undefined' ? fetch : null);
         this._window = opts.window ?? (typeof window !== 'undefined' ? window : null);
         this._document = opts.document ?? (typeof document !== 'undefined' ? document : null);
+        // Test-injectable timers. Real setTimeout/clearTimeout in production;
+        // a manual scheduler in tests so pause-after-fade is deterministic.
+        this._setTimeout = opts.setTimeout || ((cb, ms) => setTimeout(cb, ms));
+        this._clearTimeout = opts.clearTimeout || ((id) => clearTimeout(id));
 
         // Read persisted mute BEFORE constructing the master signal so the
         // very first emitted value already carries the user's preference.
@@ -168,6 +220,14 @@ export class LiteAudio {
         // Per-sound state, populated by defineSounds():
         //   { srcs:[], busName, buffer, spriteId, loadState:signal, volume, pitchVar }
         this._sounds = new Map();
+
+        // Per-track state, populated by defineTracks(). Music tracks are
+        // singletons - one instance per registered name. See _makeTrackRecord.
+        this._tracks = new Map();
+
+        // Timestamp map for playUnique(). Manager parity: keyed by name, holds
+        // performance.now() (or ctx-clock fallback). Applies to sounds AND tracks.
+        this._lastPlayed = new Map();
 
         // Reverse index: bus name -> array of soundIds routed to that bus.
         // Rebuilt after every defineSounds so pools know their sprite map.
@@ -501,8 +561,7 @@ export class LiteAudio {
     }
 
     /**
-     * Which bus issued this handle, or null. Useful for HUDs and for asserting in
-     * tests that a voice landed where its sound was routed.
+     * Which bus issued this handle, or null.
      * @param {number} handle
      * @returns {string|null}
      */
@@ -516,8 +575,9 @@ export class LiteAudio {
     }
 
     /**
-     * Voices currently sounding on a bus, or across every bus when called with no
-     * argument. Allocation-free; safe to call every frame.
+     * SFX voices currently sounding on a bus, or across every bus with no argument.
+     * Tracks are not voices and are not counted - ask trackPlaying(name).
+     * Allocation-free; safe to call every frame.
      * @param {string} [busName]
      * @returns {number}
      */
@@ -535,20 +595,475 @@ export class LiteAudio {
         return n;
     }
 
-    /** Stop every voice on a named bus. */
-    stopBus(busName) {
+    /**
+     * Stop every voice on a named bus - SFX voices AND any music track routed there.
+     * Before v1.1.0 a bus held nothing but pool voices; now that tracks share the bus
+     * graph, "stop the bus" has to mean the bus, or a scene change leaves the theme
+     * playing under the next scene.
+     * @param {string} busName
+     * @param {Object} [opts]
+     * @param {number} [opts.fade=200] - fade for tracks on this bus, ms
+     */
+    stopBus(busName, opts = {}) {
         if (this._destroyed) return;
         const busRec = this._buses.get(busName);
-        if (busRec?.pool) busRec.pool.stopAll();
+        if (!busRec) return;
+        if (busRec.pool) busRec.pool.stopAll();
+
+        const fade = opts.fade ?? DEFAULT_TRACK_FADE_MS;
+        for (const [name, rec] of this._tracks) {
+            if (rec.busName === busName && rec.playing.peek()) this.stopTrack(name, { fade });
+        }
     }
 
-    /** Stop every voice across every bus. */
-    stopAll() {
+    /**
+     * Stop every voice on every bus, and fade out every playing track.
+     * @param {Object} [opts]
+     * @param {number} [opts.fade=200] - fade for tracks, ms
+     */
+    stopAll(opts = {}) {
         if (this._destroyed) return;
         for (const [, busRec] of this._buses) {
             if (busRec.pool) busRec.pool.stopAll();
         }
+        const fade = opts.fade ?? DEFAULT_TRACK_FADE_MS;
+        for (const [name, rec] of this._tracks) {
+            if (rec.playing.peek()) this.stopTrack(name, { fade });
+        }
     }
+
+    // =========================================================================
+    // Music layer (v1.1.0). MediaElementSource-based streaming tracks routed
+    // through the same bus graph as SFX. Tracks are singletons - one instance
+    // per registered name - and addressed by name for stop/crossfade/position.
+    // =========================================================================
+
+    /**
+     * Register a set of music tracks. Same shape as defineSounds, plus:
+     *   { loop?, loopStart?, loopEnd? }.
+     * Tracks are streamed (MediaElementAudioSourceNode) rather than decoded
+     * into memory - a 5-minute track becomes ~800 KB of HTTP stream, not
+     * 50 MB of PCM.
+     *
+     * Resolves once every track has settled (ready or error). Load state per
+     * track is a signal readable via trackLoadState(name).
+     */
+    async defineTracks(config) {
+        if (this._destroyed) throw new Error('LiteAudio: destroyed');
+        if (!this._initialized) throw new Error('LiteAudio: init() before defineTracks()');
+        if (!config) return;
+
+        const loadPromises = [];
+        for (const [name, cfg] of Object.entries(config)) {
+            if (this._tracks.has(name)) continue;
+
+            const busName = cfg.bus || 'music';
+            if (!this._buses.has(busName)) {
+                throw new Error(`LiteAudio: track "${name}" routed to unknown bus "${busName}"`);
+            }
+
+            const rec = this._makeTrackRecord(name, cfg, busName);
+            this._tracks.set(name, rec);
+            loadPromises.push(this._loadTrack(rec));
+        }
+        await Promise.all(loadPromises);
+    }
+
+    /**
+     * Track record shape - kept private so callers cannot reach into the
+     * graph directly. Everything a UI needs is exposed via signal accessors.
+     */
+    _makeTrackRecord(name, cfg, busName) {
+        return {
+            name,
+            srcs: cfg.src || [],
+            busName,
+            volume: cfg.volume ?? 1,
+            loop: !!cfg.loop,
+            loopStart: cfg.loopStart ?? null,
+            loopEnd: cfg.loopEnd ?? null,
+
+            // Signals (external readouts)
+            loadState: signal('idle'),
+            playing: signal(false),
+            position: signal(0),
+            duration: signal(0),
+
+            // Graph nodes, wired on first play so a defined-but-never-played
+            // track costs one <audio> element (holding onto the URL) and no
+            // audio graph footprint.
+            element: null,
+            source: null,      // MediaElementAudioSourceNode
+            xfadeGain: null,   // GainNode: 0..1 crossfade knob
+            volumeGain: null,  // GainNode: track's baseline volume
+
+            // Throttling + handlers, so destroy() can remove them cleanly
+            lastPositionWrite: -Infinity,
+            timeupdateHandler: null,
+            endedHandler: null,
+
+            // Delayed-pause timer id (real setTimeout in production; teardown
+            // pauses the <audio> element after the fade completes so the
+            // browser stops decoding a track no one hears).
+            pauseTimer: null,
+
+            resolvedSrc: null,   // the URL picked by the format probe
+        };
+    }
+
+    async _loadTrack(rec) {
+        const url = pickSupportedSrc(rec.srcs);
+        if (!url) { rec.loadState.set('error'); return; }
+        rec.loadState.set('loading');
+        try {
+            rec.resolvedSrc = url;
+            // Create the <audio> element eagerly so metadata (duration) can
+            // populate before any play(). We do NOT wire the graph yet - that
+            // happens on first playTrack, since MediaElementSource is expensive.
+            const el = this._createAudioElement(url);
+            rec.element = el;
+
+            // 'loadedmetadata' pushes duration into the signal. Some browsers
+            // fire this eagerly for cached/short files, others take a beat.
+            const onMeta = () => {
+                rec.duration.set(Number.isFinite(el.duration) ? el.duration : 0);
+            };
+            el.addEventListener('loadedmetadata', onMeta);
+
+            // 'error' -> loadState = 'error'. We do not distinguish decode vs
+            // network errors here; the granularity is not useful to a game.
+            const onError = () => { rec.loadState.set('error'); };
+            el.addEventListener('error', onError);
+
+            rec.loadState.set('ready');
+        } catch {
+            rec.loadState.set('error');
+        }
+    }
+
+    _createAudioElement(src) {
+        if (this._document?.createElement) {
+            const el = this._document.createElement('audio');
+            el.src = src;
+            el.preload = 'auto';
+            el.crossOrigin = 'anonymous';
+            return el;
+        }
+        if (typeof Audio !== 'undefined') {
+            const el = new Audio(src);
+            el.preload = 'auto';
+            return el;
+        }
+        throw new Error('LiteAudio: no <audio> element factory available');
+    }
+
+    /**
+     * Wire a track's graph on first play. Idempotent - subsequent calls are
+     * no-ops. The graph is:
+     *   <audio> -> MediaElementSource -> xfadeGain -> volumeGain -> bus.gain
+     * xfadeGain carries crossfade curves (0..1). volumeGain carries the
+     * track's baseline volume (independent of crossfade).
+     */
+    _wireTrackGraph(rec) {
+        if (rec.source) return;
+        const busRec = this._buses.get(rec.busName);
+        if (!busRec) return;
+
+        rec.source = this._ctx.createMediaElementSource(rec.element);
+        rec.xfadeGain = this._ctx.createGain();
+        rec.xfadeGain.gain.value = 0;                // start silent, fade in
+        rec.volumeGain = this._ctx.createGain();
+        rec.volumeGain.gain.value = rec.volume;
+
+        rec.source.connect(rec.xfadeGain);
+        rec.xfadeGain.connect(rec.volumeGain);
+        rec.volumeGain.connect(busRec.gain);
+    }
+
+    /**
+     * Start (or resume) a track. Idempotent - playing a track already playing
+     * is a no-op unless `restart: true` is set, in which case the element is
+     * seeked to 0 and continues from there.
+     *
+     * `fadeIn` (ms) drives an equal-power ramp on xfadeGain, from its current
+     * value (0 for fresh play, whatever for a retarget) to the track's target
+     * xfade level (1.0). Default is 0 - snap to full immediately.
+     *
+     * Setting `position` (seconds) seeks the element before playback starts.
+     */
+    playTrack(name, opts = {}) {
+        if (this._destroyed) return;
+        const rec = this._tracks.get(name);
+        if (!rec) return;
+        if (rec.loadState.peek() !== 'ready') return;
+
+        // Locked context: playing a track before unlock is not queued the way
+        // SFX are. Music is a scene-scale operation - the caller should either
+        // wait for the unlocked() signal or set up the track after unlock.
+        if (!this._sUnlocked.peek()) return;
+
+        // Idempotency: already playing, and no restart flag -> no-op.
+        if (rec.playing.peek() && !opts.restart) return;
+
+        this._wireTrackGraph(rec);
+
+        // Cancel any pending pause from a previous stopTrack - we're back.
+        if (rec.pauseTimer != null) {
+            this._clearTimeout(rec.pauseTimer);
+            rec.pauseTimer = null;
+        }
+
+        if (opts.position != null && Number.isFinite(opts.position)) {
+            rec.element.currentTime = opts.position;
+        } else if (opts.restart) {
+            rec.element.currentTime = 0;
+        }
+
+        // Attach handlers lazily and only once. Removed on destroy or when
+        // the track record is torn down. Loop handling is done inside the
+        // handler so custom loopStart/loopEnd work even when element.loop
+        // is false (the native property would loop end -> 0, we may want
+        // end -> loopStart instead).
+        if (!rec.timeupdateHandler) {
+            const el = rec.element;
+            rec.timeupdateHandler = () => {
+                const now = this._ctx.currentTime;
+
+                // Custom loop points: seek back when currentTime crosses loopEnd.
+                if (rec.loop && rec.loopEnd != null && el.currentTime >= rec.loopEnd) {
+                    el.currentTime = rec.loopStart ?? 0;
+                }
+
+                // Position signal, throttled to POSITION_WRITE_INTERVAL of ctx time.
+                if (now - rec.lastPositionWrite >= POSITION_WRITE_INTERVAL) {
+                    rec.position.set(el.currentTime);
+                    rec.lastPositionWrite = now;
+                }
+            };
+            el.addEventListener('timeupdate', rec.timeupdateHandler);
+        }
+        if (!rec.endedHandler) {
+            rec.endedHandler = () => {
+                rec.playing.set(false);
+                // Do not tear down the graph - the caller may replay this track.
+            };
+            rec.element.addEventListener('ended', rec.endedHandler);
+        }
+
+        // Set native loop when we do NOT have custom loop points. Custom
+        // loop points require the timeupdate seek path; leaving element.loop
+        // true alongside would double-loop.
+        rec.element.loop = rec.loop && rec.loopEnd == null;
+
+        // Kick playback and schedule the fade-in curve. play() returns a
+        // promise on modern browsers; we ignore it - the graph is already
+        // wired, and any autoplay rejection is caught by ctx-locked check.
+        rec.element.play();
+        rec.playing.set(true);
+
+        const fadeInMs = opts.fadeIn ?? 0;
+        const targetGain = 1;    // xfadeGain lives 0..1
+        const now = this._ctx.currentTime;
+        if (fadeInMs > 0) {
+            const currentValue = rec.xfadeGain.gain.value;
+            const curve = scaleCurve(EQ_POWER_IN, targetGain - currentValue, currentValue);
+            rec.xfadeGain.gain.cancelScheduledValues(now);
+            rec.xfadeGain.gain.setValueAtTime(currentValue, now);
+            rec.xfadeGain.gain.setValueCurveAtTime(curve, now, fadeInMs / 1000);
+        } else {
+            rec.xfadeGain.gain.cancelScheduledValues(now);
+            rec.xfadeGain.gain.setValueAtTime(targetGain, now);
+        }
+    }
+
+    /**
+     * Fade a track out over `fade` ms and pause its element once the fade
+     * completes. The playing signal flips to false immediately - the fade
+     * tail is a graceful audio detail, not a "still playing" state a HUD
+     * should show.
+     */
+    stopTrack(name, opts = {}) {
+        if (this._destroyed) return;
+        const rec = this._tracks.get(name);
+        if (!rec || !rec.playing.peek()) return;
+
+        const fadeMs = opts.fade ?? DEFAULT_TRACK_FADE_MS;
+        rec.playing.set(false);
+
+        // Immediately schedule fade-out. Cancel any in-flight fade first so a
+        // retarget starts from wherever the automation is right now.
+        if (rec.xfadeGain) {
+            const now = this._ctx.currentTime;
+            const currentValue = rec.xfadeGain.gain.value;
+            if (fadeMs > 0) {
+                const curve = scaleCurve(EQ_POWER_OUT, currentValue, 0);
+                rec.xfadeGain.gain.cancelScheduledValues(now);
+                rec.xfadeGain.gain.setValueAtTime(currentValue, now);
+                rec.xfadeGain.gain.setValueCurveAtTime(curve, now, fadeMs / 1000);
+            } else {
+                rec.xfadeGain.gain.cancelScheduledValues(now);
+                rec.xfadeGain.gain.setValueAtTime(0, now);
+            }
+        }
+
+        // Pause the <audio> element after the fade so decoding stops. Use the
+        // injected setTimeout so tests can flush deterministically.
+        if (rec.pauseTimer != null) this._clearTimeout(rec.pauseTimer);
+        const slackMs = fadeMs + 30;
+        rec.pauseTimer = this._setTimeout(() => {
+            rec.pauseTimer = null;
+            if (!rec.playing.peek() && rec.element && !rec.element.paused) {
+                rec.element.pause();
+            }
+        }, slackMs);
+    }
+
+    /** Pause without losing position. */
+    pauseTrack(name) {
+        if (this._destroyed) return;
+        const rec = this._tracks.get(name);
+        if (!rec || !rec.playing.peek()) return;
+        rec.element?.pause();
+        rec.playing.set(false);
+    }
+
+    /**
+     * Resume from paused state. Preserves position (element.currentTime).
+     *
+     * pauseTrack() leaves xfadeGain alone, but stopTrack() fades it to zero - and
+     * nothing stops a caller from pairing stopTrack with resumeTrack. Without
+     * restoring the gain, that pair produced a track that was decoding, reporting
+     * playing() === true, and completely inaudible. So resume lifts the gain back
+     * to full over a short ramp (click-free, and a no-op when it is already there).
+     */
+    resumeTrack(name) {
+        if (this._destroyed) return;
+        const rec = this._tracks.get(name);
+        if (!rec) return;
+        if (rec.loadState.peek() !== 'ready') return;
+        if (rec.playing.peek()) return;
+        if (!this._sUnlocked.peek()) return;
+
+        // A pause scheduled by an earlier stopTrack must not land on top of us.
+        if (rec.pauseTimer != null) {
+            this._clearTimeout(rec.pauseTimer);
+            rec.pauseTimer = null;
+        }
+
+        if (rec.xfadeGain) {
+            const now = this._ctx.currentTime;
+            const currentValue = rec.xfadeGain.gain.value;
+            if (currentValue < 1) {
+                const curve = scaleCurve(EQ_POWER_IN, 1 - currentValue, currentValue);
+                rec.xfadeGain.gain.cancelScheduledValues(now);
+                rec.xfadeGain.gain.setValueAtTime(currentValue, now);
+                rec.xfadeGain.gain.setValueCurveAtTime(curve, now, RESUME_FADE_MS / 1000);
+            }
+        }
+
+        rec.element?.play();
+        rec.playing.set(true);
+    }
+
+    /**
+     * Equal-power crossfade between two tracks. Either side may be null:
+     *   crossfade('a', 'b', 400)   - a fades out while b fades in
+     *   crossfade('a', null, 400)  - fade a out
+     *   crossfade(null, 'b', 400)  - fade b in
+     *
+     * Case (c) interruption semantics: only tracks named in this call are
+     * touched. A track fading out from a previous crossfade keeps its
+     * schedule; a track fading in from a previous crossfade will be
+     * retargeted only if it appears in this new call. Every side reads its
+     * xfadeGain's current value and schedules the equal-power curve scaled
+     * to that start point, so there are no discontinuities.
+     */
+    crossfade(fromName, toName, durationMs) {
+        if (this._destroyed) return;
+        const dur = (durationMs ?? DEFAULT_TRACK_FADE_MS) / 1000;
+        const now = this._ctx.currentTime;
+
+        if (fromName) {
+            const rec = this._tracks.get(fromName);
+            if (rec && rec.playing.peek()) {
+                // Fade out. Same path as stopTrack but scoped to the schedule.
+                this.stopTrack(fromName, { fade: durationMs ?? DEFAULT_TRACK_FADE_MS });
+            }
+        }
+
+        if (toName) {
+            const rec = this._tracks.get(toName);
+            if (rec && rec.loadState.peek() === 'ready') {
+                if (!rec.playing.peek()) {
+                    // Start from silence, fade in over dur.
+                    this._wireTrackGraph(rec);
+                    if (rec.xfadeGain) rec.xfadeGain.gain.value = 0;
+                    this.playTrack(toName, { fadeIn: durationMs ?? DEFAULT_TRACK_FADE_MS });
+                } else if (rec.xfadeGain) {
+                    // Already playing (probably being retargeted mid-fade).
+                    // Curve from wherever we are to 1.0.
+                    const currentValue = rec.xfadeGain.gain.value;
+                    const curve = scaleCurve(EQ_POWER_IN, 1 - currentValue, currentValue);
+                    rec.xfadeGain.gain.cancelScheduledValues(now);
+                    rec.xfadeGain.gain.setValueAtTime(currentValue, now);
+                    rec.xfadeGain.gain.setValueCurveAtTime(curve, now, dur);
+                }
+            }
+        }
+    }
+
+    /**
+     * Start `name` and fade every OTHER playing track on the same bus. The
+     * roadmap's D1 sees buses as the physical version of manager categories:
+     * a bus-scoped exclusive on the music bus fades all other music tracks
+     * while leaving SFX (or a separate voice bus) untouched.
+     */
+    playExclusive(name, opts = {}) {
+        if (this._destroyed) return;
+        const rec = this._tracks.get(name);
+        if (!rec) return;
+        const bus = rec.busName;
+        const fadeMs = opts.fade ?? DEFAULT_TRACK_FADE_MS;
+        for (const [otherName, otherRec] of this._tracks) {
+            if (otherName === name) continue;
+            if (otherRec.busName !== bus) continue;
+            if (!otherRec.playing.peek()) continue;
+            this.stopTrack(otherName, { fade: fadeMs });
+        }
+        this.playTrack(name, opts);
+    }
+
+    /**
+     * Play `name` (sound OR track) only if the last play attempt for the
+     * same name was more than `thresholdMs` ago. Ported verbatim from the
+     * manager's timestamp map. Uses performance.now() if available,
+     * ctx.currentTime * 1000 as fallback so the threshold still means ms.
+     *
+     * Returns a voice handle when `name` is a sound, TRACK_STARTED (-2) when it is
+     * a track, and -1 when the call was throttled or the name is unknown. It cannot
+     * return 0 for a track: 0 is a real handle (bus 0, channel 0, generation 0), and
+     * a caller passing it to stop() would kill an unrelated SFX voice.
+     * @returns {number} handle >= 0, -2 (track started), or -1 (skipped)
+     */
+    playUnique(name, thresholdMs = 100) {
+        if (this._destroyed) return -1;
+        const now = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : this._ctx.currentTime * 1000;
+        const last = this._lastPlayed.get(name) ?? -Infinity;
+        if (now - last <= thresholdMs) return -1;
+        this._lastPlayed.set(name, now);
+        if (this._sounds.has(name)) return this.play(name);
+        if (this._tracks.has(name)) { this.playTrack(name); return TRACK_STARTED; }
+        return -1;
+    }
+
+    // ---------- Track signal getters ---------------------------------------
+
+    trackLoadState(name) { return this._tracks.get(name)?.loadState; }
+    trackPlaying(name)   { return this._tracks.get(name)?.playing; }
+    trackPosition(name)  { return this._tracks.get(name)?.position; }
+    trackDuration(name)  { return this._tracks.get(name)?.duration; }
 
     // ---------- Bus controls -----------------------------------------------
 
@@ -647,6 +1162,30 @@ export class LiteAudio {
             if (busRec.pool) { try { busRec.pool.destroy(); } catch {} busRec.pool = null; }
         }
 
+        // Tear down every track: cancel pending pause, remove element handlers,
+        // pause the <audio>, disconnect the MediaElementSource + gains.
+        for (const [, rec] of this._tracks) {
+            if (rec.pauseTimer != null) { this._clearTimeout(rec.pauseTimer); rec.pauseTimer = null; }
+            if (rec.element) {
+                if (rec.timeupdateHandler) {
+                    try { rec.element.removeEventListener('timeupdate', rec.timeupdateHandler); } catch {}
+                }
+                if (rec.endedHandler) {
+                    try { rec.element.removeEventListener('ended', rec.endedHandler); } catch {}
+                }
+                try { rec.element.pause(); } catch {}
+                // Drop the stream. A paused <audio> that still has a src can keep
+                // buffering, and the element is unreachable after _tracks.clear().
+                try {
+                    rec.element.removeAttribute('src');
+                    rec.element.load();
+                } catch {}
+            }
+            try { rec.source?.disconnect(); } catch {}
+            try { rec.xfadeGain?.disconnect(); } catch {}
+            try { rec.volumeGain?.disconnect(); } catch {}
+        }
+
         for (const h of this._effectHandles) {
             try { dispose(h); } catch {}
         }
@@ -663,6 +1202,8 @@ export class LiteAudio {
         this._sounds.clear();
         this._soundsByBus.clear();
         this._pendingPlays.clear();
+        this._tracks.clear();
+        this._lastPlayed.clear();
         this._master = null;
         this._ctx = null;
     }

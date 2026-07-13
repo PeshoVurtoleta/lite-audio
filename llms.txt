@@ -1,0 +1,106 @@
+# @zakkster/lite-audio
+> Zero-GC reactive Web Audio engine. Signal-driven buses, ABA-safe voice handles, unlock queue, per-bus AudioPool. SFX layer over @zakkster/lite-audio-pool.
+
+## Install
+npm i @zakkster/lite-audio @zakkster/lite-signal @zakkster/lite-audio-pool
+
+## Import
+import { LiteAudio } from '@zakkster/lite-audio';
+
+## Key Facts
+- Zero deps of its own; two peers: @zakkster/lite-signal (^1.3), @zakkster/lite-audio-pool (^1.1)
+- Signal-driven control surface: bus volumes, master mute, ctx state, per-sound load state are all reactive
+- Bus writes go through setTargetAtTime for click-free transitions (10 ms time constant)
+- Pre-unlock play() calls are queued (bounded, latest-per-sound), flushed on first user gesture
+- iOS/Safari unlock: silent-buffer pulse + resume() on touchstart/touchend/mousedown/keydown (capture phase, exact set the manager uses)
+- Handles 'interrupted' state (iOS phone-call scenario) the same as 'suspended'
+- Master mute persists to localStorage under 'lite_audio_muted' (byte-identical to lite-audio-manager for migration)
+- One AudioPool per bus (pool v1.1.0+ output param + per-play buffer override)
+- Positional hot path: play(soundId, volume, pan, pitch) - no options object per call
+- Handles are bus-tagged: busIndex * 2^32 + poolHandle. Pool handles collide across buses (every pool starts at channel 0 / generation 0), so the tag is what makes stop() name one voice
+- v1.0.0 covers SFX only; music streaming layer (MediaElementAudioSourceNode) lands in v1.1.0
+
+## Quick Start
+```js
+import { LiteAudio } from '@zakkster/lite-audio';
+
+const audio = new LiteAudio({ buses: ['sfx', 'ui', 'voice'] });
+await audio.init();                       // creates AudioContext
+await audio.defineSounds({
+    laser: { src: ['/laser.opus', '/laser.mp3'], bus: 'sfx' },
+    hit:   { src: ['/hit.wav'], bus: 'sfx', pitchVar: 0.15 },
+    click: { src: ['/click.mp3'], bus: 'ui' },
+});
+
+// Fires immediately if unlocked; queued and flushed on first gesture otherwise.
+const h = audio.play('laser', 0.8, 0.0, 1.0);
+audio.stop(h);
+audio.isPlaying(h);                       // false once stolen, stopped, or played out
+
+// Reactive readouts
+audio.unlocked();                         // ReadSignal<boolean>
+audio.ctxState();                         // ReadSignal<'suspended'|'running'|'interrupted'|'closed'>
+audio.loadState('laser');                 // ReadSignal<'idle'|'loading'|'ready'|'error'>
+audio.busVolume('sfx');                   // ReadSignal<number>
+
+// Writes
+audio.setBusVolume('sfx', 0.5);
+audio.setBusMuted('ui', true);
+audio.setMuted(true);                     // master, persists to localStorage
+
+audio.destroy();                          // idempotent
+```
+
+## Export: LiteAudio (class)
+
+### Constructor
+```
+new LiteAudio(opts?)
+```
+- `opts.buses?: string[]` - defaults ['sfx', 'ui', 'voice']. 'master' is implicit.
+- `opts.poolCapacity?: number` - defaults 32.
+- `opts.queueLimit?: number` - defaults 32.
+- `opts.mutedStorageKey?: string` - defaults 'lite_audio_muted'.
+- `opts.fetch?, opts.window?, opts.document?` - test injectables.
+
+### async init(ctx?): Promise<void>
+Wires the engine to an AudioContext. Creates one via globalThis.AudioContext if none passed. Sets up master gain, bus gains, master-mute effect, per-bus volume+mute effects, statechange listener, unlock listeners.
+
+### async defineSounds(config): Promise<void>
+Fetches and decodes every sound in the config. Config shape:
+```
+{ [soundId]: { src: string[], bus?: string, volume?: number, pitchVar?: number } }
+```
+Resolves after every sound has settled. Load state per sound is a reactive signal readable via loadState(soundId). Pools are built (or rebuilt) once per touched bus at the end.
+
+### play(soundId, volume?, pan?, pitch?): number
+Positional hot path. Returns a handle >= 0 on success, -1 on any skip (unknown sound, not-yet-ready sound, context locked). Locked plays are queued (latest-per-sound, bounded by queueLimit) and flushed on unlock.
+
+### playOpts(soundId, opts?): number
+Sugar over play() with pitchVar resolution: `pitch = 1 + (rand*2-1)*pitchVar`.
+
+### stop(handle): void
+Stops a specific play. Stale handles (channel stolen or already ended) are silent no-ops. The handle carries its bus, so stop() resolves the owning pool in O(1) and can never reach across a bus boundary.
+
+### isPlaying(handle): boolean, busOf(handle): string|null, activeCount(busName?): number
+Liveness of one voice, the bus that issued a handle, and the live voice count per bus or engine-wide.
+
+### stopBus(busName): void, stopAll(): void
+Bus- and engine-wide stops.
+
+### setBusVolume(name, v), setBusMuted(name, m), setMuted(state)
+Signal setters. Every write schedules a setTargetAtTime on the affected GainNode with a 10 ms time constant.
+
+### Reactive readables
+`ctxState() : ReadSignal<CtxState>`
+`unlocked() : ReadSignal<boolean>`
+`muted() : ReadSignal<boolean>`
+`loadState(id) : ReadSignal<LoadState> | undefined`
+`busVolume(name), busMuted(name) : ReadSignal | undefined`
+`busNode(name) : GainNode | undefined`
+`masterNode() : GainNode | null`
+
+### destroy(): void
+Stops every voice, tears down pools (which disconnect their nodes), disposes signal effects, aborts unlock/lifecycle controllers, releases references. Idempotent. Does not close the AudioContext.
+
+See Audio.js source for full inline documentation.

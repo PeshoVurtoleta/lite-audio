@@ -1,0 +1,2196 @@
+<!doctype html>
+<!-- @zakkster/lite-audio - demo. (c) Zahary Shinikchiev. -->
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>lite-audio - reactive engine</title>
+    <style>
+        :root {
+            --bg: #070b07;
+            --bg: oklch(0.16 0.02 145);
+            --panel: #0d140e;
+            --panel: oklch(0.20 0.025 145);
+            --panel-in: #0a100b;
+            --panel-in: oklch(0.18 0.02 145);
+            --grid: #16221a;
+            --grid: oklch(0.26 0.04 145);
+            --dim: #3f5f42;
+            --dim: oklch(0.48 0.08 145);
+            --ink: #b8e6b8;
+            --ink: oklch(0.86 0.10 145);
+            --phosphor: #66ff66;
+            --phosphor: oklch(0.90 0.28 145);
+            --amber: #ffb84d;
+            --amber: oklch(0.83 0.17 75);
+            --hot: #ff5252;
+            --hot: oklch(0.68 0.24 25);
+            --scan: rgba(102, 255, 102, 0.028);
+            --font-mono: 'SF Mono', 'JetBrains Mono', 'IBM Plex Mono', Menlo, Consolas, monospace;
+            --hair: 1px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html {
+            color-scheme: dark;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100dvh;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            background-color: var(--bg);
+            background-image: repeating-linear-gradient(0deg, transparent 0 3px, var(--scan) 3px 4px),
+            radial-gradient(ellipse at 50% 40%, transparent 40%, rgba(0, 0, 0, 0.55) 100%);
+            color: var(--ink);
+            font-family: var(--font-mono);
+            font-size: 0.8125rem;
+            line-height: 1.45;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 0.75rem 1.5rem;
+            flex-wrap: wrap;
+            padding-bottom: 0.625rem;
+            border-bottom: var(--hair) solid var(--grid);
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 0.9375rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            color: var(--phosphor);
+            text-shadow: 0 0 0.75rem color-mix(in oklch, var(--phosphor) 45%, transparent);
+        }
+
+        h1 span {
+            color: var(--dim);
+            font-weight: 400;
+            letter-spacing: 0.04em;
+        }
+
+        header p {
+            margin: 0.25rem 0 0;
+            color: var(--dim);
+            max-width: 48rem;
+            font-size: 0.75rem;
+        }
+
+        #badge {
+            color: var(--dim);
+            font-size: 0.6875rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+
+        #badge b {
+            color: var(--amber);
+            font-weight: 500;
+        }
+
+        #badge b.on {
+            color: var(--phosphor);
+        }
+
+        #tabs {
+            display: flex;
+            gap: 0.375rem;
+            flex-wrap: wrap;
+        }
+
+        #tabs button {
+            min-width: 8rem;
+        }
+
+        .deck {
+            display: grid;
+            gap: 0.75rem;
+            grid-template-columns: minmax(0, 1fr);
+            flex: 1;
+            min-height: 0;
+        }
+
+        .deck[hidden] {
+            display: none;
+        }
+
+        .panel {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            min-height: 0;
+            gap: 0.5rem;
+            padding: 0.625rem 0.75rem 0.75rem;
+            background: var(--panel);
+            border: var(--hair) solid var(--grid);
+            border-radius: 3px;
+            box-shadow: inset 0 0 2rem rgba(0, 0, 0, 0.45);
+        }
+
+        .panel-title {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 0.75rem;
+            color: var(--dim);
+            font-size: 0.625rem;
+            text-transform: uppercase;
+            letter-spacing: 0.18em;
+        }
+
+        .panel-title b {
+            color: var(--phosphor);
+            font-weight: 500;
+            letter-spacing: 0.1em;
+        }
+
+        .note {
+            color: var(--dim);
+            font-size: 0.6875rem;
+            margin: 0;
+        }
+
+        .note em {
+            color: var(--ink);
+            font-style: normal;
+        }
+
+        .note b {
+            color: var(--amber);
+            font-weight: 500;
+        }
+
+        .screen {
+            position: relative;
+            flex: 1;
+            min-height: 4rem;
+            background: var(--panel-in);
+            border: var(--hair) solid var(--grid);
+            border-radius: 2px;
+        }
+
+        .screen canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+            touch-action: none;
+        }
+
+        button {
+            background: transparent;
+            color: var(--ink);
+            border: var(--hair) solid var(--dim);
+            border-radius: 2px;
+            padding: 0.375rem 0.625rem;
+            font: inherit;
+            font-size: 0.75rem;
+            letter-spacing: 0.06em;
+            cursor: pointer;
+            transition: color 120ms, border-color 120ms, background-color 120ms;
+        }
+
+        @media (hover: hover) {
+            button:hover:not(:disabled) {
+                color: var(--phosphor);
+                border-color: var(--phosphor);
+            }
+        }
+
+        button.on {
+            color: var(--phosphor);
+            border-color: var(--phosphor);
+            background: color-mix(in oklch, var(--phosphor) 10%, transparent);
+        }
+
+        button.hot {
+            color: var(--hot);
+            border-color: var(--hot);
+        }
+
+        button:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+        }
+
+        :is(button, input, a):focus-visible {
+            outline: 2px solid var(--phosphor);
+            outline-offset: 2px;
+        }
+
+        .row {
+            display: flex;
+            gap: 0.375rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .row > .lbl {
+            flex: 0 0 100%;
+            color: var(--dim);
+            font-size: 0.625rem;
+            text-transform: uppercase;
+            letter-spacing: 0.16em;
+        }
+
+        .strip {
+            display: grid;
+            grid-template-columns: 3.5rem 1fr 3rem 4rem;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .strip .name {
+            color: var(--ink);
+            letter-spacing: 0.08em;
+        }
+
+        .strip output {
+            color: var(--phosphor);
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            font-size: 0.75rem;
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 1.25rem;
+            background: transparent;
+            cursor: pointer;
+        }
+
+        input[type="range"]::-webkit-slider-runnable-track {
+            height: 2px;
+            background: var(--grid);
+            border-radius: 1px;
+        }
+
+        input[type="range"]::-moz-range-track {
+            height: 2px;
+            background: var(--grid);
+            border-radius: 1px;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 0.625rem;
+            height: 1rem;
+            margin-top: -0.4375rem;
+            border-radius: 1px;
+            background: var(--phosphor);
+            box-shadow: 0 0 0.5rem color-mix(in oklch, var(--phosphor) 60%, transparent);
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 0.625rem;
+            height: 1rem;
+            border: 0;
+            border-radius: 1px;
+            background: var(--phosphor);
+        }
+
+        dl.readout {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 0.1875rem 1rem;
+            margin: 0;
+            align-content: start;
+        }
+
+        dl.readout dt {
+            color: var(--dim);
+            font-size: 0.6875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        dl.readout dd {
+            margin: 0;
+            text-align: right;
+            color: var(--phosphor);
+            font-variant-numeric: tabular-nums;
+        }
+
+        dl.readout dd.warn {
+            color: var(--hot);
+        }
+
+        dl.readout dd.idle {
+            color: var(--dim);
+        }
+
+        /* ---- SVG state machines ---- */
+        .fsm {
+            width: 100%;
+            height: auto;
+        }
+
+        .fsm .edge {
+            fill: none;
+            stroke: var(--grid);
+            stroke-width: 1.25;
+        }
+
+        .fsm .edge-label {
+            fill: var(--dim);
+            font-size: 8px;
+            letter-spacing: 0.06em;
+        }
+
+        .fsm .state-node circle {
+            fill: var(--panel-in);
+            stroke: var(--grid);
+            stroke-width: 1.25;
+        }
+
+        .fsm .state-node text {
+            fill: var(--dim);
+            font-size: 9px;
+            text-anchor: middle;
+            letter-spacing: 0.06em;
+        }
+
+        .fsm .state-node.active circle {
+            stroke: var(--phosphor);
+            fill: color-mix(in oklch, var(--phosphor) 12%, transparent);
+        }
+
+        .fsm .state-node.active text {
+            fill: var(--phosphor);
+        }
+
+        .fsm .state-node.warn circle {
+            stroke: var(--hot);
+            fill: color-mix(in oklch, var(--hot) 12%, transparent);
+        }
+
+        .fsm .state-node.warn text {
+            fill: var(--hot);
+        }
+
+        /* ---- tables ---- */
+        .tbl {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .trow {
+            display: grid;
+            gap: 0.5rem;
+            align-items: center;
+            padding: 0.3125rem 0.5rem;
+            border: var(--hair) solid var(--grid);
+            border-radius: 2px;
+            background: var(--panel-in);
+            font-size: 0.75rem;
+        }
+
+        .trow[hidden] {
+            display: none;
+        }
+
+        #sounds .trow {
+            grid-template-columns: 5rem 3.5rem 1fr 4.5rem 3rem;
+            cursor: pointer;
+        }
+
+        #sounds .trow.sel {
+            border-color: var(--phosphor);
+        }
+
+        #queue .trow {
+            grid-template-columns: 6rem 1fr;
+        }
+
+        #handles .trow {
+            grid-template-columns: 3rem 8.5rem 1fr auto;
+        }
+
+        .trow code {
+            color: var(--ink);
+        }
+
+        .trow .meta {
+            color: var(--dim);
+            font-size: 0.6875rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .trow .st {
+            font-size: 0.6875rem;
+            letter-spacing: 0.1em;
+            text-align: right;
+        }
+
+        .st.ready, .st.live {
+            color: var(--phosphor);
+        }
+
+        .st.loading {
+            color: var(--amber);
+        }
+
+        .st.error, .st.stolen {
+            color: var(--hot);
+        }
+
+        .st.idle, .st.ended {
+            color: var(--dim);
+        }
+
+        .st.stopped {
+            color: var(--amber);
+        }
+
+        .trow button {
+            padding: 0.1875rem 0.5rem;
+            font-size: 0.6875rem;
+        }
+
+        .empty {
+            color: var(--dim);
+            font-size: 0.6875rem;
+            padding: 0.5rem;
+            text-align: center;
+        }
+
+        .rack {
+            display: grid;
+            gap: 0.75rem;
+            grid-template-columns: minmax(0, 1fr);
+        }
+
+        #log {
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            font-size: 0.6875rem;
+        }
+
+        .lrow {
+            display: grid;
+            grid-template-columns: 4rem 4.75rem 1fr;
+            gap: 0.5rem;
+            padding: 0.0625rem 0.25rem;
+            color: var(--dim);
+            white-space: nowrap;
+            overflow: hidden;
+        }
+
+        .lrow .tag {
+            letter-spacing: 0.1em;
+        }
+
+        .lrow .msg {
+            color: var(--ink);
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .lrow.play .tag {
+            color: var(--phosphor);
+        }
+
+        .lrow.queue .tag {
+            color: var(--amber);
+        }
+
+        .lrow.drop .tag {
+            color: var(--hot);
+        }
+
+        .lrow.state .tag {
+            color: var(--amber);
+        }
+
+        .lrow.load .tag {
+            color: var(--dim);
+        }
+
+        .lrow.bus .tag {
+            color: var(--dim);
+        }
+
+        .lrow.stop .tag {
+            color: var(--amber);
+        }
+
+        #gate {
+            position: fixed;
+            inset: 0;
+            z-index: 10;
+            display: grid;
+            place-items: center;
+            padding: 1rem;
+            background: color-mix(in oklch, var(--bg) 88%, transparent);
+            backdrop-filter: blur(2px);
+        }
+
+        #gate[hidden] {
+            display: none;
+        }
+
+        #gate-inner {
+            max-width: 28rem;
+            padding: 1.75rem;
+            text-align: center;
+            background: var(--panel);
+            border: var(--hair) solid var(--phosphor);
+            border-radius: 4px;
+            box-shadow: 0 0 3rem color-mix(in oklch, var(--phosphor) 12%, transparent);
+        }
+
+        #gate p {
+            color: var(--dim);
+            font-size: 0.75rem;
+        }
+
+        #gate button {
+            margin-top: 0.75rem;
+            padding: 0.625rem 1.75rem;
+            font-size: 0.875rem;
+            color: var(--phosphor);
+            border-color: var(--phosphor);
+        }
+
+        @media (min-width: 62rem) {
+            #deck-unlock {
+                grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+                grid-template-areas: "fsm queue" "ctl queue";
+            }
+
+            #p-fsm-ctx {
+                grid-area: fsm;
+            }
+
+            #p-unlock-ctl {
+                grid-area: ctl;
+            }
+
+            #p-queue {
+                grid-area: queue;
+            }
+
+            #deck-loader {
+                grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+                grid-template-areas: "sounds fsm" "sounds lctl";
+            }
+
+            #p-sounds {
+                grid-area: sounds;
+            }
+
+            #p-fsm-load {
+                grid-area: fsm;
+            }
+
+            #p-loader-ctl {
+                grid-area: lctl;
+            }
+
+            #deck-mixer {
+                grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+                grid-template-rows: minmax(10rem, 1fr) auto;
+                grid-template-areas: "scope strips" "meters strips";
+            }
+
+            #p-gainscope {
+                grid-area: scope;
+            }
+
+            #p-meters {
+                grid-area: meters;
+            }
+
+            #p-strips {
+                grid-area: strips;
+            }
+
+            #deck-voices {
+                grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+                grid-template-rows: minmax(10rem, 1fr) auto;
+                grid-template-areas: "matrix handles" "twins handles";
+            }
+
+            #p-matrix {
+                grid-area: matrix;
+            }
+
+            #p-twins {
+                grid-area: twins;
+            }
+
+            #p-handles {
+                grid-area: handles;
+            }
+
+            .rack {
+                grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                transition: none !important;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <div>
+        <h1>lite-audio <span>/ v1.0.0 / reactive Web Audio engine</span></h1>
+        <p>Signals drive the mixer, one AudioPool sits under each bus, and plays made before the browser unlocks audio
+            are not dropped - they queue and fire on the first gesture. This demo drives the engine's unlock through an
+            injected window, so the part you normally only get one shot at is replayable.</p>
+    </div>
+    <div id="badge">ctx <b id="b-state">-</b> / unlocked <b id="b-unlocked">no</b> / voices <b id="b-voices">0</b></div>
+</header>
+
+<nav id="tabs" aria-label="scenes">
+    <button data-scene="0" class="on" aria-pressed="true">1 / unlock</button>
+    <button data-scene="1" aria-pressed="false">2 / loader</button>
+    <button data-scene="2" aria-pressed="false">3 / mixer</button>
+    <button data-scene="3" aria-pressed="false">4 / voices</button>
+</nav>
+
+<!-- ============================ UNLOCK =================================== -->
+<main id="deck-unlock" class="deck">
+    <section id="p-fsm-ctx" class="panel">
+        <div class="panel-title"><span>AudioContext lifecycle / ctxState() signal</span><b
+                id="fsm-ctx-now">suspended</b></div>
+        <svg class="fsm" id="fsm-ctx" viewBox="0 0 520 160" role="img" aria-label="context state machine">
+            <defs>
+                <marker id="ah-ctx" markerWidth="7" markerHeight="7" refX="6" refY="2.5" orient="auto">
+                    <path d="M0,0 L0,5 L6,2.5 z" fill="#3f5f42"/>
+                </marker>
+            </defs>
+            <path class="edge" d="M112,62 L196,62" marker-end="url(#ah-ctx)"/>
+            <text class="edge-label" x="118" y="55">gesture + resume()</text>
+            <path class="edge" d="M196,86 L112,86" marker-end="url(#ah-ctx)"/>
+            <text class="edge-label" x="120" y="100">suspend()</text>
+            <path class="edge" d="M282,60 L378,36" marker-end="url(#ah-ctx)"/>
+            <text class="edge-label" x="288" y="36">phone call (iOS)</text>
+            <path class="edge" d="M382,58 L288,76" marker-end="url(#ah-ctx)"/>
+            <text class="edge-label" x="300" y="92">resume()</text>
+            <path class="edge" d="M282,96 L378,122" marker-end="url(#ah-ctx)"/>
+            <text class="edge-label" x="292" y="128">close()</text>
+            <g class="state-node" data-ctx="suspended">
+                <circle cx="70" cy="74" r="40"/>
+                <text x="70" y="78">suspended</text>
+            </g>
+            <g class="state-node" data-ctx="running">
+                <circle cx="240" cy="74" r="40"/>
+                <text x="240" y="78">running</text>
+            </g>
+            <g class="state-node" data-ctx="interrupted">
+                <circle cx="424" cy="32" r="30"/>
+                <text x="424" y="36">interrupted</text>
+            </g>
+            <g class="state-node" data-ctx="closed">
+                <circle cx="424" cy="128" r="26"/>
+                <text x="424" y="132">closed</text>
+            </g>
+        </svg>
+        <p class="note">The engine listens for <em>touchstart / touchend / mousedown / keydown</em> at capture phase,
+            pulses a silent buffer (iOS needs it), calls <em>resume()</em>, and flushes the queue. Real clicks would
+            unlock it instantly, so this demo hands the engine a <b>fake window</b> via <em>opts.window</em> and fires
+            the gesture itself.</p>
+    </section>
+
+    <section id="p-unlock-ctl" class="panel">
+        <div class="panel-title"><span>dispatch</span><b id="lock-state">locked</b></div>
+        <div class="row">
+            <span class="lbl">play while locked (these queue)</span>
+            <button data-qplay="laser">laser</button>
+            <button data-qplay="click">click</button>
+            <button data-qplay="pad">pad</button>
+            <button id="b-spam">spam laser x5</button>
+            <button id="b-flood">flood 6 distinct</button>
+        </div>
+        <div class="row">
+            <span class="lbl">gesture</span>
+            <button id="b-gesture" class="on">dispatch first gesture</button>
+            <button id="b-relock">re-lock and rebuild</button>
+        </div>
+        <p class="note">Latest-per-sound: spamming one sound overwrites its queued intent instead of stacking five
+            voices. Bounded: <em>queueLimit</em> is <b>4</b> here, so a sixth distinct sound is dropped rather than
+            becoming a burst on unlock.</p>
+    </section>
+
+    <section id="p-queue" class="panel">
+        <div class="panel-title"><span>pending plays</span><b id="q-size">0 / 4</b></div>
+        <div class="tbl" id="queue"></div>
+        <div class="empty" id="q-empty">queue empty</div>
+        <dl class="readout">
+            <dt>played straight through</dt>
+            <dd id="c-played">0</dd>
+            <dt>queued</dt>
+            <dd id="c-queued">0</dd>
+            <dt>collapsed onto a queued sound</dt>
+            <dd id="c-collapsed">0</dd>
+            <dt>dropped (over limit)</dt>
+            <dd id="c-dropped">0</dd>
+        </dl>
+        <p class="note">Read from <em>engine._pendingPlays</em> - demo-only introspection. The engine has no public
+            readable for queue depth, which is arguably a gap: a loading screen would want it.</p>
+    </section>
+</main>
+
+<!-- ============================ LOADER =================================== -->
+<main id="deck-loader" class="deck" hidden>
+    <section id="p-sounds" class="panel">
+        <div class="panel-title"><span>sounds / loadState() signal per sound</span><b>click a row</b></div>
+        <div class="tbl" id="sounds"></div>
+        <p class="note">Assets are synthesized in an <em>OfflineAudioContext</em>, encoded to WAV, and handed to the
+            engine as blob: URLs - so the demo is one file with no asset folder, and still exercises the real fetch +
+            decode path. <b>thunder</b> is served through an injected <em>fetch</em> with 2.6s of artificial latency;
+            <b>broken</b> is answered with a 404 by that same injected fetch, which walks the loader's real error path
+            without a real request failing in your console.</p>
+    </section>
+
+    <section id="p-fsm-load" class="panel">
+        <div class="panel-title"><span>load lifecycle</span><b id="fsm-load-now">-</b></div>
+        <svg class="fsm" id="fsm-load" viewBox="0 0 420 130" role="img" aria-label="load state machine">
+            <defs>
+                <marker id="ah-load" markerWidth="7" markerHeight="7" refX="6" refY="2.5" orient="auto">
+                    <path d="M0,0 L0,5 L6,2.5 z" fill="#3f5f42"/>
+                </marker>
+            </defs>
+            <path class="edge" d="M92,65 L146,65" marker-end="url(#ah-load)"/>
+            <text class="edge-label" x="94" y="58">defineSounds()</text>
+            <path class="edge" d="M232,52 L288,32" marker-end="url(#ah-load)"/>
+            <text class="edge-label" x="236" y="30">decoded</text>
+            <path class="edge" d="M232,80 L288,100" marker-end="url(#ah-load)"/>
+            <text class="edge-label" x="236" y="112">fetch / decode threw</text>
+            <g class="state-node" data-load="idle">
+                <circle cx="58" cy="65" r="32"/>
+                <text x="58" y="69">idle</text>
+            </g>
+            <g class="state-node" data-load="loading">
+                <circle cx="190" cy="65" r="38"/>
+                <text x="190" y="69">loading</text>
+            </g>
+            <g class="state-node" data-load="ready">
+                <circle cx="330" cy="28" r="28"/>
+                <text x="330" y="32">ready</text>
+            </g>
+            <g class="state-node" data-load="error">
+                <circle cx="330" cy="102" r="28"/>
+                <text x="330" y="106">error</text>
+            </g>
+        </svg>
+    </section>
+
+    <section id="p-loader-ctl" class="panel">
+        <div class="panel-title"><span>loader</span></div>
+        <div class="row">
+            <button id="b-reload">reload all sounds</button>
+            <button id="b-play-selected">play selected</button>
+            <button id="b-race">play thunder while it loads</button>
+        </div>
+        <p class="note">A play aimed at a sound that has not landed yet returns <b>-1</b> and joins the same queue: <em>defineSounds()</em>
+            flushes it the moment the buffer decodes. Press <em>reload</em>, then <em>play thunder</em> immediately - it
+            fires 2.6s later, on its own.</p>
+    </section>
+</main>
+
+<!-- ============================ MIXER ==================================== -->
+<main id="deck-mixer" class="deck" hidden>
+    <section id="p-gainscope" class="panel">
+        <div class="panel-title"><span>gain scope / actual GainNode.value vs signal target</span><b>10ms time
+            constant</b></div>
+        <div class="screen">
+            <canvas id="cv-gain"></canvas>
+        </div>
+    </section>
+
+    <section id="p-meters" class="panel">
+        <div class="panel-title"><span>bus meters / AnalyserNode tapped on busNode()</span></div>
+        <div class="screen">
+            <canvas id="cv-meters"></canvas>
+        </div>
+    </section>
+
+    <section id="p-strips" class="panel">
+        <div class="panel-title"><span>mixer / busVolume() + busMuted() signals</span></div>
+        <div id="strips"></div>
+        <div class="row">
+            <span class="lbl">master</span>
+            <button id="b-mute">mute</button>
+            <span class="note" id="storage-note">lite_audio_muted = false</span>
+        </div>
+        <p class="note">Every write lands as <em>setTargetAtTime(target, now, 0.01)</em>, never a raw <em>.value =</em>.
+            Mute a bus mid-tone and watch the trace bend instead of stepping - that bend is the click you do not hear.
+            Master mute survives a reload: it is persisted under the same localStorage key <em>lite-audio-manager</em>
+            used, on purpose.</p>
+    </section>
+</main>
+
+<!-- ============================ VOICES =================================== -->
+<main id="deck-voices" class="deck" hidden>
+    <section id="p-matrix" class="panel">
+        <div class="panel-title"><span>voice matrix / one AudioPool per bus, 8 channels each</span><b id="v-active">0
+            voices</b></div>
+        <div class="screen">
+            <canvas id="cv-matrix"></canvas>
+        </div>
+    </section>
+
+    <section id="p-twins" class="panel">
+        <div class="panel-title"><span>the twin-handle trap</span></div>
+        <div class="row">
+            <button id="b-twins">issue twin handles</button>
+            <button id="b-stop-sfx">stop the sfx one</button>
+            <button id="b-overrun">overrun sfx (10 lasers into 8 channels)</button>
+        </div>
+        <p class="note" id="twin-note">Every pool counts channels and generations from zero, so the first play on <em>sfx</em>
+            and the first play on <em>ui</em> both come back as raw pool handle <b>0x00000000</b>. Press <em>issue twin
+                handles</em> to see it.</p>
+    </section>
+
+    <section id="p-handles" class="panel">
+        <div class="panel-title"><span>handles issued</span><b>newest first</b></div>
+        <div class="tbl" id="handles"></div>
+        <div class="empty" id="h-empty">no handles yet</div>
+        <p class="note">The engine tags the bus above the pool's 32 bits: <em>busIndex * 2^32 + poolHandle</em>. The raw
+            column is what the pool returned; the bus column is what makes the handle name one voice engine-wide.
+            Without the tag, <em>stop()</em> on an sfx handle would also kill whatever sat on channel 0 of every other
+            bus.</p>
+    </section>
+</main>
+
+<div class="rack">
+    <section class="panel">
+        <div class="panel-title"><span>engine</span></div>
+        <dl class="readout">
+            <dt>buses</dt>
+            <dd id="e-buses">-</dd>
+            <dt>pool capacity</dt>
+            <dd id="e-cap">-</dd>
+            <dt>queue limit</dt>
+            <dd id="e-qlimit">-</dd>
+            <dt>sounds ready</dt>
+            <dd id="e-ready">-</dd>
+        </dl>
+        <div class="row">
+            <button id="b-stopall">stop all voices</button>
+        </div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-title"><span>event log</span><b>signal transitions + plays</b></div>
+        <div id="log"></div>
+    </section>
+</div>
+
+<div id="gate">
+    <div id="gate-inner">
+        <div class="panel-title"><span>engine offline</span></div>
+        <p>Starting creates an AudioContext, immediately suspends it so the engine boots <em>locked</em>, synthesizes
+            eight sounds offline, and wires them in. Nothing is audible until you dispatch the gesture yourself, on
+            scene 1.</p>
+        <button id="gate-btn">boot the engine</button>
+    </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "@zakkster/lite-audio": "../Audio.js",
+    "@zakkster/lite-signal": "https://esm.sh/@zakkster/lite-signal@^1.3.0",
+    "@zakkster/lite-audio-pool": "https://esm.sh/@zakkster/lite-audio-pool@^1.1.0"
+  }
+}
+
+</script>
+
+<script type="module">
+    import {LiteAudio} from '@zakkster/lite-audio';
+    import {effect, dispose} from '@zakkster/lite-signal';
+
+    // ---------------------------------------------------------------------------
+    // Config
+    // ---------------------------------------------------------------------------
+
+    const SR = 44100;
+    const BUSES = ['sfx', 'ui', 'music'];
+    const POOL_CAPACITY = 8;
+    const QUEUE_LIMIT = 4;
+    const THUNDER_LATENCY_MS = 2600;
+
+    const TELEM_MASK = 0x07;
+    const TRACE_CAP = 512, TRACE_MASK = 511;
+    const LOG_ROWS = 10;
+    const HANDLE_ROWS = 6;
+
+    // soundId -> [busName, synthFn, volume, pitchVar]
+    const SOUNDS = [
+        ['laser', 'sfx', synthLaser, 0.8, 0.15],
+        ['hit', 'sfx', synthHit, 0.9, 0.10],
+        ['coin', 'sfx', synthCoin, 0.7, 0.05],
+        ['thunder', 'sfx', synthThunder, 0.9, 0.00],
+        ['click', 'ui', synthClick, 0.6, 0.00],
+        ['blip', 'ui', synthBlip, 0.6, 0.08],
+        ['pad', 'music', synthPad, 0.5, 0.00],
+    ];
+    const BROKEN_ID = 'broken';
+
+    const H_LIVE = 0, H_ENDED = 1, H_STOLEN = 2, H_STOPPED = 3;
+    const H_LABEL = ['LIVE', 'ENDED', 'STOLEN', 'STOPPED'];
+    const H_CLASS = ['st live', 'st ended', 'st stolen', 'st stopped'];
+
+    const probe = document.createElement('canvas').getContext('2d');
+    probe.fillStyle = '#000000';
+    probe.fillStyle = 'oklch(0.9 0.28 145)';
+    const OKLCH = probe.fillStyle !== '#000000';
+
+    const C_PHOS = OKLCH ? 'oklch(0.90 0.28 145)' : '#66ff66';
+    const C_PHOS_12 = OKLCH ? 'oklch(0.90 0.28 145 / 0.12)' : 'rgba(102,255,102,0.12)';
+    const C_AMBER = OKLCH ? 'oklch(0.83 0.17 75)' : '#ffb84d';
+    const C_CYAN = OKLCH ? 'oklch(0.85 0.13 220)' : '#7fd4ff';
+    const C_HOT = OKLCH ? 'oklch(0.68 0.24 25)' : '#ff5252';
+    const C_DIM = OKLCH ? 'oklch(0.48 0.08 145)' : '#3f5f42';
+    const C_GRID = OKLCH ? 'oklch(0.30 0.05 145)' : '#16221a';
+    const C_INK = OKLCH ? 'oklch(0.86 0.10 145)' : '#b8e6b8';
+    const C_CLEAR = OKLCH ? 'oklch(0.18 0.02 145)' : '#0a100b';
+
+    const BUS_COLOR = [C_PHOS, C_AMBER, C_CYAN];
+    const FONT_S = '9px ui-monospace, Menlo, Consolas, monospace';
+    const FONT_M = '10px ui-monospace, Menlo, Consolas, monospace';
+
+    // ---------------------------------------------------------------------------
+    // DOM
+    // ---------------------------------------------------------------------------
+
+    const $tabBtns = document.querySelectorAll('#tabs [data-scene]');
+    const $decks = [
+        document.getElementById('deck-unlock'),
+        document.getElementById('deck-loader'),
+        document.getElementById('deck-mixer'),
+        document.getElementById('deck-voices'),
+    ];
+
+    const $bState = document.getElementById('b-state');
+    const $bUnlocked = document.getElementById('b-unlocked');
+    const $bVoices = document.getElementById('b-voices');
+    const $lockState = document.getElementById('lock-state');
+    const $fsmCtxNow = document.getElementById('fsm-ctx-now');
+    const $fsmLoadNow = document.getElementById('fsm-load-now');
+    const $ctxNodes = document.querySelectorAll('#fsm-ctx [data-ctx]');
+    const $loadNodes = document.querySelectorAll('#fsm-load [data-load]');
+
+    const $queue = document.getElementById('queue');
+    const $qEmpty = document.getElementById('q-empty');
+    const $qSize = document.getElementById('q-size');
+    const $cPlayed = document.getElementById('c-played');
+    const $cQueued = document.getElementById('c-queued');
+    const $cCollapsed = document.getElementById('c-collapsed');
+    const $cDropped = document.getElementById('c-dropped');
+    const $bGesture = document.getElementById('b-gesture');
+    const $bRelock = document.getElementById('b-relock');
+    const $bSpam = document.getElementById('b-spam');
+    const $bFlood = document.getElementById('b-flood');
+
+    const $sounds = document.getElementById('sounds');
+    const $bReload = document.getElementById('b-reload');
+    const $bPlaySel = document.getElementById('b-play-selected');
+    const $bRace = document.getElementById('b-race');
+
+    const $strips = document.getElementById('strips');
+    const $bMute = document.getElementById('b-mute');
+    const $storageNote = document.getElementById('storage-note');
+
+    const $vActive = document.getElementById('v-active');
+    const $handles = document.getElementById('handles');
+    const $hEmpty = document.getElementById('h-empty');
+    const $bTwins = document.getElementById('b-twins');
+    const $bStopSfx = document.getElementById('b-stop-sfx');
+    const $bOverrun = document.getElementById('b-overrun');
+    const $twinNote = document.getElementById('twin-note');
+
+    const $eBuses = document.getElementById('e-buses');
+    const $eCap = document.getElementById('e-cap');
+    const $eQlimit = document.getElementById('e-qlimit');
+    const $eReady = document.getElementById('e-ready');
+    const $bStopAll = document.getElementById('b-stopall');
+
+    const $log = document.getElementById('log');
+    const $gate = document.getElementById('gate');
+    const $gateBtn = document.getElementById('gate-btn');
+
+    // ---------------------------------------------------------------------------
+    // Canvas
+    // ---------------------------------------------------------------------------
+
+    function mkCanvas(id) {
+        const el = document.getElementById(id);
+        let c = null;
+        try {
+            c = el.getContext('2d', {colorSpace: 'display-p3'});
+        } catch (e) {
+            c = null;
+        }
+        if (!c) c = el.getContext('2d');
+        return {el, c, w: 1, h: 1};
+    }
+
+    const cvGain = mkCanvas('cv-gain');
+    const cvMeters = mkCanvas('cv-meters');
+    const cvMatrix = mkCanvas('cv-matrix');
+    const ALL_CV = [cvGain, cvMeters, cvMatrix];
+    let needResize = 1;
+
+    function sizeAll() {
+        const dpr = window.devicePixelRatio || 1;
+        for (const rec of ALL_CV) {
+            const r = rec.el.getBoundingClientRect();
+            if (r.width < 1 || r.height < 1) continue;
+            rec.el.width = Math.round(r.width * dpr);
+            rec.el.height = Math.round(r.height * dpr);
+            rec.c.setTransform(dpr, 0, 0, dpr, 0, 0);
+            rec.w = r.width;
+            rec.h = r.height;
+        }
+    }
+
+    const ro = new ResizeObserver(() => {
+        needResize = 1;
+    });
+    for (const rec of ALL_CV) ro.observe(rec.el);
+
+    // ---------------------------------------------------------------------------
+    // Synthesis. Every asset is rendered offline, encoded to WAV, and served to the
+    // engine as a blob: URL - a real fetch, a real decodeAudioData, no asset folder.
+    // ---------------------------------------------------------------------------
+
+    async function render(seconds, build) {
+        const off = new OfflineAudioContext(1, Math.ceil(SR * seconds), SR);
+        build(off, off.destination);
+        return await off.startRendering();
+    }
+
+    function noiseBuffer(off, seconds, curve) {
+        const n = Math.floor(SR * seconds);
+        const buf = off.createBuffer(1, n, SR);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < n; i++) {
+            const decay = 1 - i / n;
+            d[i] = (Math.random() * 2 - 1) * Math.pow(decay, curve);
+        }
+        return buf;
+    }
+
+    function synthLaser() {
+        return render(0.20, (off, out) => {
+            const o = off.createOscillator();
+            const g = off.createGain();
+            o.frequency.setValueAtTime(1650, 0);
+            o.frequency.exponentialRampToValueAtTime(150, 0.18);
+            g.gain.setValueAtTime(0.0001, 0);
+            g.gain.linearRampToValueAtTime(0.4, 0.004);
+            g.gain.exponentialRampToValueAtTime(0.001, 0.18);
+            o.connect(g);
+            g.connect(out);
+            o.start(0);
+            o.stop(0.2);
+        });
+    }
+
+    function synthHit() {
+        return render(0.14, (off, out) => {
+            const n = off.createBufferSource();
+            n.buffer = noiseBuffer(off, 0.12, 2);
+            const bp = off.createBiquadFilter();
+            bp.type = 'bandpass';
+            bp.frequency.value = 1900;
+            bp.Q.value = 1.4;
+            const g = off.createGain();
+            g.gain.setValueAtTime(0.55, 0);
+            g.gain.exponentialRampToValueAtTime(0.001, 0.1);
+            n.connect(bp);
+            bp.connect(g);
+            g.connect(out);
+            n.start(0);
+
+            const o = off.createOscillator();
+            o.type = 'square';
+            const og = off.createGain();
+            o.frequency.setValueAtTime(420, 0);
+            o.frequency.exponentialRampToValueAtTime(70, 0.13);
+            og.gain.setValueAtTime(0.0001, 0);
+            og.gain.linearRampToValueAtTime(0.25, 0.004);
+            og.gain.exponentialRampToValueAtTime(0.001, 0.13);
+            o.connect(og);
+            og.connect(out);
+            o.start(0);
+            o.stop(0.14);
+        });
+    }
+
+    function synthCoin() {
+        return render(0.30, (off, out) => {
+            note(off, out, 0.00, 0.07, 988);
+            note(off, out, 0.07, 0.20, 1319);
+        });
+    }
+
+    function note(off, out, at, dur, hz) {
+        const o = off.createOscillator();
+        o.type = 'square';
+        o.frequency.value = hz;
+        const g = off.createGain();
+        g.gain.setValueAtTime(0.0001, at);
+        g.gain.linearRampToValueAtTime(0.22, at + 0.005);
+        g.gain.setValueAtTime(0.22, at + dur * 0.6);
+        g.gain.exponentialRampToValueAtTime(0.001, at + dur);
+        o.connect(g);
+        g.connect(out);
+        o.start(at);
+        o.stop(at + dur);
+    }
+
+    function synthThunder() {
+        return render(1.20, (off, out) => {
+            const n = off.createBufferSource();
+            n.buffer = noiseBuffer(off, 1.15, 1.2);
+            const lp = off.createBiquadFilter();
+            lp.type = 'lowpass';
+            lp.frequency.setValueAtTime(1800, 0);
+            lp.frequency.exponentialRampToValueAtTime(120, 1.1);
+            const g = off.createGain();
+            g.gain.setValueAtTime(0.0001, 0);
+            g.gain.linearRampToValueAtTime(0.7, 0.06);
+            g.gain.exponentialRampToValueAtTime(0.001, 1.15);
+            n.connect(lp);
+            lp.connect(g);
+            g.connect(out);
+            n.start(0);
+
+            const sub = off.createOscillator();
+            const sg = off.createGain();
+            sub.frequency.setValueAtTime(70, 0);
+            sub.frequency.exponentialRampToValueAtTime(28, 0.9);
+            sg.gain.setValueAtTime(0.0001, 0);
+            sg.gain.linearRampToValueAtTime(0.5, 0.02);
+            sg.gain.exponentialRampToValueAtTime(0.001, 1.0);
+            sub.connect(sg);
+            sg.connect(out);
+            sub.start(0);
+            sub.stop(1.2);
+        });
+    }
+
+    function synthClick() {
+        return render(0.06, (off, out) => {
+            const n = off.createBufferSource();
+            n.buffer = noiseBuffer(off, 0.05, 4);
+            const hp = off.createBiquadFilter();
+            hp.type = 'highpass';
+            hp.frequency.value = 2600;
+            const g = off.createGain();
+            g.gain.setValueAtTime(0.5, 0);
+            g.gain.exponentialRampToValueAtTime(0.001, 0.05);
+            n.connect(hp);
+            hp.connect(g);
+            g.connect(out);
+            n.start(0);
+        });
+    }
+
+    function synthBlip() {
+        return render(0.12, (off, out) => {
+            const o = off.createOscillator();
+            o.type = 'triangle';
+            const g = off.createGain();
+            o.frequency.setValueAtTime(340, 0);
+            o.frequency.exponentialRampToValueAtTime(1180, 0.09);
+            g.gain.setValueAtTime(0.0001, 0);
+            g.gain.linearRampToValueAtTime(0.32, 0.012);
+            g.gain.exponentialRampToValueAtTime(0.001, 0.11);
+            o.connect(g);
+            g.connect(out);
+            o.start(0);
+            o.stop(0.12);
+        });
+    }
+
+    function synthPad() {
+        return render(3.20, (off, out) => {
+            const lp = off.createBiquadFilter();
+            lp.type = 'lowpass';
+            lp.Q.value = 5;
+            lp.frequency.setValueAtTime(260, 0);
+            lp.frequency.exponentialRampToValueAtTime(2400, 1.9);
+            lp.frequency.exponentialRampToValueAtTime(320, 3.15);
+            const g = off.createGain();
+            g.gain.setValueAtTime(0.0001, 0);
+            g.gain.linearRampToValueAtTime(0.26, 0.35);
+            g.gain.setValueAtTime(0.26, 2.7);
+            g.gain.exponentialRampToValueAtTime(0.001, 3.15);
+            lp.connect(g);
+            g.connect(out);
+            for (let i = 0; i < 3; i++) {
+                const o = off.createOscillator();
+                o.type = 'sawtooth';
+                o.frequency.value = 110 * (i === 2 ? 1.5 : 1);
+                o.detune.value = (i - 1) * 9;
+                o.connect(lp);
+                o.start(0);
+                o.stop(3.2);
+            }
+        });
+    }
+
+    function encodeWav(buffer) {
+        const len = buffer.length;
+        const data = buffer.getChannelData(0);
+        const bytes = 44 + len * 2;
+        const ab = new ArrayBuffer(bytes);
+        const dv = new DataView(ab);
+        let p = 0;
+        const str = (s) => {
+            for (let i = 0; i < s.length; i++) dv.setUint8(p++, s.charCodeAt(i));
+        };
+        str('RIFF');
+        dv.setUint32(p, bytes - 8, true);
+        p += 4;
+        str('WAVE');
+        str('fmt ');
+        dv.setUint32(p, 16, true);
+        p += 4;
+        dv.setUint16(p, 1, true);
+        p += 2;
+        dv.setUint16(p, 1, true);
+        p += 2;
+        dv.setUint32(p, SR, true);
+        p += 4;
+        dv.setUint32(p, SR * 2, true);
+        p += 4;
+        dv.setUint16(p, 2, true);
+        p += 2;
+        dv.setUint16(p, 16, true);
+        p += 2;
+        str('data');
+        dv.setUint32(p, len * 2, true);
+        p += 4;
+        for (let i = 0; i < len; i++) {
+            let v = data[i];
+            if (v > 1) v = 1; else if (v < -1) v = -1;
+            dv.setInt16(p, v * 32767, true);
+            p += 2;
+        }
+        return new Blob([ab], {type: 'audio/wav'});
+    }
+
+    const urlById = new Map();
+    const durById = new Map();
+    const latencyByUrl = new Map();
+
+    async function buildAssets() {
+        for (const [id, , synth] of SOUNDS) {
+            const buf = await synth();
+            const url = URL.createObjectURL(encodeWav(buf));
+            urlById.set(id, url);
+            durById.set(id, buf.duration);
+            if (id === 'thunder') latencyByUrl.set(url, THUNDER_LATENCY_MS);
+        }
+        urlById.set(BROKEN_ID, 'demo://unreachable-asset.mp3');
+        durById.set(BROKEN_ID, 0);
+    }
+
+    // Injected fetch: same contract the engine expects, with a stopwatch bolted on so
+    // 'loading' is a state you can actually see rather than a frame you miss.
+    async function demoFetch(url) {
+        if (url === urlById.get(BROKEN_ID)) {
+            // Synthetic 404. The loader only reads resp.ok and resp.status, so this walks
+            // the identical error path a dead CDN would - without firing a real request
+            // that paints a red line in the console of a demo that is working correctly.
+            // Want the real thing? Delete this branch and point BROKEN_ID at a 404 URL.
+            await new Promise((r) => setTimeout(r, 400));
+            return {ok: false, status: 404, statusText: 'Not Found'};
+        }
+        const wait = latencyByUrl.get(url) || 0;
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        return fetch(url);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Fake window: the engine unlocks on the first real gesture at capture phase, so
+    // with a real window this demo would unlock the instant you touched any button.
+    // opts.window is documented as a test injectable; here it makes the queue replayable.
+    // ---------------------------------------------------------------------------
+
+    function mkFakeWindow() {
+        const cbs = [];
+        return {
+            addEventListener(evt, cb) {
+                cbs.push(cb);
+            },
+            removeEventListener() {
+            },
+            fire() {
+                for (const cb of cbs.slice()) cb({type: 'demo-gesture'});
+            },
+        };
+    }
+
+    // ---------------------------------------------------------------------------
+    // State
+    // ---------------------------------------------------------------------------
+
+    let ctx = null;
+    let engine = null;
+    let fakeWin = null;
+    let effects = [];
+    let analysers = null;
+    let sink = null;
+    let meterBuf = null;
+
+    let scene = 0;
+    let selected = 'laser';
+    let frameCount = 0;
+
+    let cPlayed = 0, cQueued = 0, cCollapsed = 0, cDropped = 0;
+
+    // gain traces: one ring per bus + master
+    const traces = [];
+    for (let i = 0; i <= BUSES.length; i++) traces.push(new Float32Array(TRACE_CAP));
+    let traceHead = 0;
+
+    const levels = new Float32Array(BUSES.length);
+    const peaks = new Float32Array(BUSES.length);
+
+    // handle table
+    const hHandle = new Float64Array(HANDLE_ROWS);
+    const hStatus = new Uint8Array(HANDLE_ROWS);
+    const hEnd = new Float64Array(HANDLE_ROWS);   // f64: absolute ctx time, same trap as the pool's
+    const hBus = new Array(HANDLE_ROWS);
+    const hSound = new Array(HANDLE_ROWS);
+    let hCount = 0;
+    let twinSfx = -1, twinUi = -1;
+
+    // ---------------------------------------------------------------------------
+    // Log
+    // ---------------------------------------------------------------------------
+
+    const $logRows = [];
+    for (let i = 0; i < LOG_ROWS; i++) {
+        const row = document.createElement('div');
+        row.className = 'lrow';
+        const t = document.createElement('span');
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        const msg = document.createElement('span');
+        msg.className = 'msg';
+        row.append(t, tag, msg);
+        $log.appendChild(row);
+        $logRows.push({row, t, tag, msg});
+    }
+    const logRing = new Array(LOG_ROWS * 2).fill(null);
+    let logHead = 0;
+    let logDirty = 1;
+
+    function logPush(kind, msg) {
+        logRing[logHead % logRing.length] = [nowSeconds(), kind, msg];
+        logHead++;
+        logDirty = 1;
+    }
+
+    function nowSeconds() {
+        return ctx ? ctx.currentTime : 0;
+    }
+
+    function renderLog() {
+        for (let r = 0; r < LOG_ROWS; r++) {
+            const idx = logHead - 1 - r;
+            const view = $logRows[r];
+            if (idx < 0) {
+                view.row.className = 'lrow';
+                view.t.textContent = '';
+                view.tag.textContent = '';
+                view.msg.textContent = '';
+                continue;
+            }
+            const e = logRing[idx % logRing.length];
+            if (!e) continue;
+            view.row.className = 'lrow ' + e[1];
+            view.t.textContent = e[0].toFixed(2) + 's';
+            view.tag.textContent = e[1];
+            view.msg.textContent = e[2];
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Boot / rebuild
+    // ---------------------------------------------------------------------------
+
+    async function boot() {
+        if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)({latencyHint: 'interactive'});
+        await buildAssets();
+        await buildEngine();
+    }
+
+    async function buildEngine() {
+        // Suspend first: init() reads ctx.state, and a context created inside a click
+        // handler is already 'running'. We want the engine to boot locked, on purpose.
+        try {
+            await ctx.suspend();
+        } catch (e) { /* already suspended */
+        }
+
+        fakeWin = mkFakeWindow();
+        engine = new LiteAudio({
+            buses: BUSES,
+            poolCapacity: POOL_CAPACITY,
+            queueLimit: QUEUE_LIMIT,
+            window: fakeWin,
+            document: document,
+            fetch: demoFetch,
+        });
+        await engine.init(ctx);
+
+        attachTaps();
+        buildStrips();
+        bindSignals();
+        resetCounters();
+        hCount = 0;
+        twinSfx = -1;
+        twinUi = -1;
+        renderHandles();
+
+        $eBuses.textContent = BUSES.join(' / ');
+        $eCap.textContent = POOL_CAPACITY + ' per bus';
+        $eQlimit.textContent = QUEUE_LIMIT;
+
+        logPush('state', 'engine built, context suspended: locked');
+        defineAll();                                  // deliberately not awaited
+    }
+
+    async function defineAll() {
+        const config = {};
+        for (const [id, bus, , volume, pitchVar] of SOUNDS) {
+            config[id] = {src: [urlById.get(id)], bus, volume, pitchVar};
+        }
+        config[BROKEN_ID] = {src: [urlById.get(BROKEN_ID)], bus: 'sfx'};
+        buildSoundRows();
+
+        // Not awaited before binding: defineSounds() registers every sound record (and
+        // its loadState signal) synchronously, and only then awaits the fetches. Binding
+        // here catches idle -> loading -> ready live; binding after the await would only
+        // ever show the settled state.
+        const settled = engine.defineSounds(config);
+        bindLoadSignals();
+        await settled;
+        updateReadyCount();
+    }
+
+    function attachTaps() {
+        if (!analysers) {
+            analysers = [];
+            for (let i = 0; i < BUSES.length; i++) {
+                const an = ctx.createAnalyser();
+                an.fftSize = 256;
+                analysers.push(an);
+            }
+            meterBuf = new Uint8Array(256);
+            // Analysers on a dead-end branch are not reliably pulled, so the taps land
+            // in a muted sink that is wired to the destination.
+            sink = ctx.createGain();
+            sink.gain.value = 0;
+            sink.connect(ctx.destination);
+            for (const an of analysers) an.connect(sink);
+        }
+        for (let i = 0; i < BUSES.length; i++) {
+            const node = engine.busNode(BUSES[i]);
+            if (node) node.connect(analysers[i]);
+        }
+    }
+
+    function disposeEffects() {
+        for (const h of effects) {
+            try {
+                dispose(h);
+            } catch (e) {
+            }
+        }
+        effects.length = 0;
+    }
+
+    async function rebuild(keepUnlocked) {
+        disposeEffects();
+        engine.destroy();
+        await buildEngine();
+        if (keepUnlocked) fakeWin.fire();            // straight back to running
+    }
+
+    function resetCounters() {
+        cPlayed = 0;
+        cQueued = 0;
+        cCollapsed = 0;
+        cDropped = 0;
+        levels.fill(0);
+        peaks.fill(0);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Signal bindings. Every readable on the engine is a lite-signal signal, so the
+    // whole HUD is effects - no polling, no manual invalidation.
+    // ---------------------------------------------------------------------------
+
+    function bindSignals() {
+        effects.push(effect(() => {
+            const state = engine.ctxState()();
+            $bState.textContent = state;
+            $fsmCtxNow.textContent = state;
+            for (const node of $ctxNodes) {
+                const match = node.dataset.ctx === state;
+                node.classList.toggle('active', match && state !== 'interrupted' && state !== 'closed');
+                node.classList.toggle('warn', match && (state === 'interrupted' || state === 'closed'));
+            }
+            logPush('state', 'ctxState -> ' + state);
+        }));
+
+        effects.push(effect(() => {
+            const on = engine.unlocked()();
+            $bUnlocked.textContent = on ? 'yes' : 'no';
+            $bUnlocked.classList.toggle('on', on);
+            $lockState.textContent = on ? 'unlocked' : 'locked';
+            $bGesture.disabled = on;
+            logPush('state', 'unlocked -> ' + on);
+        }));
+
+        effects.push(effect(() => {
+            const m = engine.muted()();
+            $bMute.classList.toggle('on', m);
+            $bMute.setAttribute('aria-pressed', m ? 'true' : 'false');
+            $storageNote.textContent = 'lite_audio_muted = ' + m;
+            logPush('bus', 'master mute -> ' + m);
+        }));
+
+        for (const name of BUSES) {
+            effects.push(effect(() => {
+                const v = engine.busVolume(name)();
+                const m = engine.busMuted(name)();
+                const strip = stripByBus.get(name);
+                if (strip) {
+                    strip.out.textContent = m ? 'muted' : v.toFixed(2);
+                    strip.mute.classList.toggle('on', m);
+                    strip.mute.setAttribute('aria-pressed', m ? 'true' : 'false');
+                }
+                logPush('bus', name + ' -> ' + (m ? 'muted' : 'vol ' + v.toFixed(2)));
+            }));
+        }
+    }
+
+    function bindLoadSignals() {
+        for (const id of allSoundIds()) {
+            const sig = engine.loadState(id);
+            if (!sig) continue;
+            effects.push(effect(() => {
+                const state = sig();
+                const row = soundRows.get(id);
+                if (row) {
+                    row.st.className = 'st ' + state;
+                    row.st.textContent = state.toUpperCase();
+                }
+                if (id === selected) paintLoadFsm(state);
+                logPush('load', id + ' -> ' + state);
+                updateReadyCount();
+            }));
+        }
+    }
+
+    function allSoundIds() {
+        const ids = SOUNDS.map((s) => s[0]);
+        ids.push(BROKEN_ID);
+        return ids;
+    }
+
+    function updateReadyCount() {
+        let n = 0, total = 0;
+        for (const id of allSoundIds()) {
+            total++;
+            const sig = engine.loadState(id);
+            if (sig && sig.peek() === 'ready') n++;
+        }
+        $eReady.textContent = n + ' / ' + total;
+    }
+
+    function paintLoadFsm(state) {
+        $fsmLoadNow.textContent = selected + ': ' + state;
+        for (const node of $loadNodes) {
+            const match = node.dataset.load === state;
+            node.classList.toggle('active', match && state !== 'error');
+            node.classList.toggle('warn', match && state === 'error');
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Rows: sounds, mixer strips
+    // ---------------------------------------------------------------------------
+
+    const soundRows = new Map();
+
+    function buildSoundRows() {
+        $sounds.textContent = '';
+        soundRows.clear();
+        for (const id of allSoundIds()) {
+            const bus = id === BROKEN_ID ? 'sfx' : SOUNDS.find((s) => s[0] === id)[1];
+            const row = document.createElement('div');
+            row.className = 'trow' + (id === selected ? ' sel' : '');
+            row.dataset.sound = id;
+
+            const name = document.createElement('code');
+            name.textContent = id;
+            const busEl = document.createElement('span');
+            busEl.className = 'meta';
+            busEl.textContent = bus;
+            const src = document.createElement('span');
+            src.className = 'meta';
+            src.textContent = id === BROKEN_ID
+                ? 'unreachable / injected 404'
+                : 'blob: wav ' + durById.get(id).toFixed(2) + 's';
+            const st = document.createElement('span');
+            st.className = 'st idle';
+            st.textContent = 'IDLE';
+            const play = document.createElement('button');
+            play.textContent = 'play';
+            play.dataset.play = id;
+
+            row.append(name, busEl, src, st, play);
+            $sounds.appendChild(row);
+            soundRows.set(id, {row, st});
+        }
+    }
+
+    const stripByBus = new Map();
+
+    function buildStrips() {
+        $strips.textContent = '';
+        stripByBus.clear();
+        for (const name of BUSES) {
+            const wrap = document.createElement('div');
+            wrap.className = 'strip';
+
+            const label = document.createElement('span');
+            label.className = 'name';
+            label.textContent = name;
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = '0';
+            slider.max = '100';
+            // Initial position comes from the signal, not from a number typed in markup.
+            slider.value = String(Math.round(engine.busVolume(name).peek() * 100));
+            slider.setAttribute('aria-label', name + ' volume');
+            slider.addEventListener('input', () => {
+                engine.setBusVolume(name, (slider.value | 0) / 100);
+            });
+
+            const out = document.createElement('output');
+            out.textContent = engine.busVolume(name).peek().toFixed(2);
+
+            const mute = document.createElement('button');
+            mute.textContent = 'mute';
+            mute.addEventListener('click', () => {
+                engine.setBusMuted(name, !engine.busMuted(name).peek());
+            });
+
+            wrap.append(label, slider, out, mute);
+            $strips.appendChild(wrap);
+            stripByBus.set(name, {slider, out, mute});
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Play paths
+    // ---------------------------------------------------------------------------
+
+    /**
+     * Wraps engine.play() so the demo can name what happened to a call that came back
+     * -1. The engine returns the same -1 for "queued", "collapsed onto an existing
+     * queue entry", and "dropped, queue full" - so the demo watches the queue map to
+     * tell them apart. A public queue readable would remove the need for this.
+     */
+    function firePlay(id, volume, pan, pitch) {
+        if (!engine) return -1;
+        const q = engine._pendingPlays;
+        const had = q.has(id);
+        const before = q.size;
+
+        const h = engine.play(id, volume, pan, pitch);
+
+        if (h >= 0) {
+            cPlayed++;
+            pushHandle(h, id, pitch);
+            logPush('play', id + ' -> ' + engine.busOf(h) + ' ch ' + ((h >>> 0) & 0xFF));
+            return h;
+        }
+        if (had) {
+            cCollapsed++;
+            logPush('queue', id + ' collapsed onto its queued intent');
+        } else if (q.size === before) {
+            cDropped++;
+            logPush('drop', id + ' dropped: queue at limit ' + QUEUE_LIMIT);
+        } else {
+            cQueued++;
+            logPush('queue', id + ' queued, waiting on gesture or decode');
+        }
+        return -1;
+    }
+
+    function pushHandle(h, id, pitch) {
+        for (let i = HANDLE_ROWS - 1; i > 0; i--) {
+            hHandle[i] = hHandle[i - 1];
+            hStatus[i] = hStatus[i - 1];
+            hEnd[i] = hEnd[i - 1];
+            hBus[i] = hBus[i - 1];
+            hSound[i] = hSound[i - 1];
+        }
+        hHandle[0] = h;
+        hStatus[0] = H_LIVE;
+        // When this voice would have finished on its own. If isPlaying() goes false
+        // before then, the channel was taken from under it: stolen, not ended.
+        hEnd[0] = ctx.currentTime + 0.025 + (durById.get(id) || 0) / (pitch || 1);
+        hBus[0] = engine.busOf(h);
+        hSound[0] = id;
+        if (hCount < HANDLE_ROWS) hCount++;
+        renderHandles();
+    }
+
+    // ---------------------------------------------------------------------------
+    // Handle table
+    // ---------------------------------------------------------------------------
+
+    function hex32(v) {
+        let s = (v >>> 0).toString(16).toUpperCase();
+        while (s.length < 8) s = '0' + s;
+        return '0x' + s;
+    }
+
+    function settle(i) {
+        if (hStatus[i] !== H_LIVE) return false;
+        if (engine.isPlaying(hHandle[i])) return false;
+        hStatus[i] = ctx.currentTime >= hEnd[i] ? H_ENDED : H_STOLEN;
+        return true;
+    }
+
+    function renderHandles() {
+        $hEmpty.hidden = hCount > 0;
+        $handles.textContent = '';
+        for (let i = 0; i < hCount; i++) {
+            const h = hHandle[i];
+            settle(i);
+
+            const row = document.createElement('div');
+            row.className = 'trow';
+
+            const bus = document.createElement('span');
+            bus.className = 'meta';
+            bus.textContent = hBus[i];
+
+            const raw = document.createElement('code');
+            raw.textContent = hex32(h);
+
+            const meta = document.createElement('span');
+            meta.className = 'meta';
+            meta.textContent = hSound[i] + ' / ch ' + ((h >>> 0) & 0xFF);
+
+            const st = document.createElement('span');
+            st.className = H_CLASS[hStatus[i]];
+            st.textContent = H_LABEL[hStatus[i]];
+
+            const stop = document.createElement('button');
+            stop.textContent = 'stop';
+            const idx = i;
+            stop.addEventListener('click', () => {
+                const live = engine.isPlaying(hHandle[idx]);
+                engine.stop(hHandle[idx]);
+                hStatus[idx] = live ? H_STOPPED : hStatus[idx];
+                logPush('stop', live
+                    ? 'stopped ' + hSound[idx] + ' on ' + hBus[idx]
+                    : 'stale handle, no-op (' + hBus[idx] + ')');
+                renderHandles();
+            });
+
+            row.append(bus, raw, meta, st, stop);
+            $handles.appendChild(row);
+        }
+    }
+
+    function refreshHandleStatuses() {
+        let dirty = false;
+        for (let i = 0; i < hCount; i++) if (settle(i)) dirty = true;
+        if (dirty) renderHandles();
+    }
+
+    // ---------------------------------------------------------------------------
+    // Drawing
+    // ---------------------------------------------------------------------------
+
+    function sampleTraces() {
+        if (!engine) return;
+        for (let i = 0; i < BUSES.length; i++) {
+            const node = engine.busNode(BUSES[i]);
+            traces[i][traceHead & TRACE_MASK] = node ? node.gain.value : 0;
+        }
+        const master = engine.masterNode();
+        traces[BUSES.length][traceHead & TRACE_MASK] = master ? master.gain.value : 0;
+        traceHead = (traceHead + 1) | 0;
+    }
+
+    function drawGainScope() {
+        const c = cvGain.c, w = cvGain.w, h = cvGain.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+
+        c.strokeStyle = C_GRID;
+        c.lineWidth = 1;
+        c.beginPath();
+        for (let i = 1; i < 4; i++) {
+            const y = Math.round(h * i / 4) + 0.5;
+            c.moveTo(0, y);
+            c.lineTo(w, y);
+        }
+        c.stroke();
+
+        c.font = FONT_M;
+        c.fillStyle = C_DIM;
+        c.fillText('1.0', 4, 11);
+        c.fillText('0.0', 4, h - 4);
+
+        const step = w / TRACE_CAP;
+        for (let t = 0; t <= BUSES.length; t++) {
+            const ring = traces[t];
+            c.beginPath();
+            for (let k = 0; k < TRACE_CAP; k++) {
+                const idx = (traceHead + k) & TRACE_MASK;
+                const v = ring[idx];
+                const x = k * step;
+                const y = h - 4 - v * (h - 14);
+                if (k === 0) c.moveTo(x, y);
+                else c.lineTo(x, y);
+            }
+            const master = t === BUSES.length;
+            c.strokeStyle = master ? C_INK : BUS_COLOR[t];
+            c.lineWidth = master ? 1.75 : 1.25;
+            c.setLineDash(master ? [4, 3] : []);
+            c.stroke();
+        }
+        c.setLineDash([]);
+
+        let lx = 40;
+        for (let t = 0; t <= BUSES.length; t++) {
+            const label = t === BUSES.length ? 'master' : BUSES[t];
+            c.fillStyle = t === BUSES.length ? C_INK : BUS_COLOR[t];
+            c.fillText(label, lx, 11);
+            lx += label.length * 6 + 14;
+        }
+    }
+
+    function drawMeters() {
+        const c = cvMeters.c, w = cvMeters.w, h = cvMeters.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+        if (!analysers) return;
+
+        const rows = BUSES.length;
+        const rh = h / rows;
+        c.font = FONT_M;
+
+        for (let i = 0; i < rows; i++) {
+            analysers[i].getByteTimeDomainData(meterBuf);
+            let acc = 0;
+            for (let k = 0; k < meterBuf.length; k++) {
+                const v = (meterBuf[k] - 128) / 128;
+                acc += v * v;
+            }
+            const rms = Math.sqrt(acc / meterBuf.length);
+            levels[i] = rms > levels[i] ? rms : levels[i] + (rms - levels[i]) * 0.15;
+            peaks[i] = levels[i] > peaks[i] ? levels[i] : peaks[i] - 0.006;
+
+            const y = i * rh + 4;
+            const bh = rh - 10;
+            c.fillStyle = C_DIM;
+            c.fillText(BUSES[i], 6, y + bh * 0.5 + 4);
+
+            const x0 = 52;
+            const bw = w - x0 - 10;
+            c.fillStyle = 'rgba(255,255,255,0.03)';
+            c.fillRect(x0, y, bw, bh);
+
+            const v = Math.min(1, levels[i] * 2.2);
+            c.fillStyle = BUS_COLOR[i];
+            c.fillRect(x0, y, bw * v, bh);
+
+            const p = Math.min(1, peaks[i] * 2.2);
+            if (p > 0.01) {
+                c.fillStyle = C_INK;
+                c.fillRect(x0 + bw * p - 1, y, 2, bh);
+            }
+        }
+    }
+
+    function drawMatrix() {
+        const c = cvMatrix.c, w = cvMatrix.w, h = cvMatrix.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+        if (!engine) return;
+
+        const now = ctx.currentTime;
+        const rows = BUSES.length;
+        const rh = h / rows;
+        c.font = FONT_S;
+        c.textBaseline = 'top';
+
+        for (let b = 0; b < rows; b++) {
+            // Pool state is not public: the engine exposes activeCount(), not the
+            // channel array. Reading it here is demo-only introspection.
+            const pool = engine._buses.get(BUSES[b])?.pool;
+            const y0 = b * rh + 2;
+            const cellH = rh - 20;
+
+            c.fillStyle = C_DIM;
+            c.font = FONT_M;
+            c.fillText(BUSES[b], 4, y0 + cellH + 3);
+
+            if (!pool) continue;
+            const cap = pool.capacity;
+            const pad = 3;
+            const cw = (w - pad) / cap - pad;
+
+            c.font = FONT_S;
+            for (let i = 0; i < cap; i++) {
+                const x = pad + i * (cw + pad);
+                const live = pool.expireTimes[i] > now;
+                c.fillStyle = live ? C_PHOS_12 : 'rgba(255,255,255,0.015)';
+                c.fillRect(x, y0, cw, cellH);
+
+                if (live) {
+                    const remain = pool.expireTimes[i] - now;
+                    const frac = Math.max(0, Math.min(1, remain / 1.2));
+                    c.fillStyle = BUS_COLOR[b];
+                    c.globalAlpha = 0.35;
+                    c.fillRect(x, y0 + cellH * (1 - frac), cw, cellH * frac);
+                    c.globalAlpha = 1;
+                }
+
+                c.strokeStyle = live ? BUS_COLOR[b] : C_GRID;
+                c.lineWidth = 1;
+                c.strokeRect(x + 0.5, y0 + 0.5, cw - 1, cellH - 1);
+
+                c.fillStyle = live ? C_INK : C_DIM;
+                c.fillText(String(i), x + 3, y0 + 3);
+                c.fillStyle = C_DIM;
+                c.fillText('g' + pool.generations[i], x + 3, y0 + cellH - 12);
+            }
+        }
+        c.textBaseline = 'alphabetic';
+    }
+
+    // ---------------------------------------------------------------------------
+    // Frame loop
+    // ---------------------------------------------------------------------------
+
+    function frame() {
+        frameCount = (frameCount + 1) | 0;
+        if (needResize) {
+            needResize = 0;
+            sizeAll();
+        }
+
+        if (engine) {
+            sampleTraces();
+            if (scene === 2) {
+                drawGainScope();
+                drawMeters();
+            } else if (scene === 3) drawMatrix();
+
+            if ((frameCount & TELEM_MASK) === 0) {
+                const total = engine.activeCount();
+                $bVoices.textContent = total;
+                $vActive.textContent = total + ' voices';
+                if (scene === 0) renderQueue();
+                if (scene === 3) refreshHandleStatuses();
+                if (logDirty) {
+                    logDirty = 0;
+                    renderLog();
+                }
+            }
+        }
+        requestAnimationFrame(frame);
+    }
+
+    function renderQueue() {
+        const q = engine._pendingPlays;
+        $qSize.textContent = q.size + ' / ' + QUEUE_LIMIT;
+        $qEmpty.hidden = q.size > 0;
+        $queue.textContent = '';
+        for (const [id, args] of q) {
+            const row = document.createElement('div');
+            row.className = 'trow';
+            const name = document.createElement('code');
+            name.textContent = id;
+            const meta = document.createElement('span');
+            meta.className = 'meta';
+            meta.textContent = 'vol ' + args[1].toFixed(2) + ' / pan ' + args[2].toFixed(2) + ' / pitch ' + args[3].toFixed(2);
+            row.append(name, meta);
+            $queue.appendChild(row);
+        }
+        $cPlayed.textContent = cPlayed;
+        $cQueued.textContent = cQueued;
+        $cCollapsed.textContent = cCollapsed;
+        $cDropped.textContent = cDropped;
+        $cDropped.className = cDropped > 0 ? 'warn' : '';
+    }
+
+    // ---------------------------------------------------------------------------
+    // Input
+    // ---------------------------------------------------------------------------
+
+    $tabBtns.forEach((b) => {
+        b.addEventListener('click', () => {
+            scene = b.dataset.scene | 0;
+            for (let i = 0; i < $tabBtns.length; i++) {
+                const on = i === scene;
+                $tabBtns[i].classList.toggle('on', on);
+                $tabBtns[i].setAttribute('aria-pressed', on ? 'true' : 'false');
+                $decks[i].hidden = !on;
+            }
+            needResize = 1;
+        });
+    });
+
+    document.querySelectorAll('[data-qplay]').forEach((b) => {
+        b.addEventListener('click', () => firePlay(b.dataset.qplay, 0.9, 0, 1));
+    });
+
+    $bSpam.addEventListener('click', () => {
+        for (let i = 0; i < 5; i++) firePlay('laser', 0.9, (i - 2) * 0.4, 1 + i * 0.05);
+    });
+
+    $bFlood.addEventListener('click', () => {
+        const ids = ['laser', 'hit', 'coin', 'click', 'blip', 'pad'];
+        for (const id of ids) firePlay(id, 0.8, 0, 1);
+    });
+
+    $bGesture.addEventListener('click', () => {
+        logPush('state', 'dispatching synthetic first gesture');
+        fakeWin.fire();
+    });
+
+    $bRelock.addEventListener('click', async () => {
+        $bRelock.disabled = true;
+        await rebuild(false);                        // the whole point: boot locked again
+        $bRelock.disabled = false;
+    });
+
+    $sounds.addEventListener('click', (e) => {
+        const play = e.target.closest('button[data-play]');
+        if (play) {
+            firePlay(play.dataset.play, 0.9, 0, 1);
+            return;
+        }
+        const row = e.target.closest('[data-sound]');
+        if (!row) return;
+        selected = row.dataset.sound;
+        for (const [id, rec] of soundRows) rec.row.classList.toggle('sel', id === selected);
+        const sig = engine.loadState(selected);
+        paintLoadFsm(sig ? sig.peek() : 'idle');
+    });
+
+    $bPlaySel.addEventListener('click', () => firePlay(selected, 0.9, 0, 1));
+
+    $bRace.addEventListener('click', async () => {
+        $bRace.disabled = true;
+        await rebuild(true);
+        // thunder is 2.6s from decoding. play() cannot fire it, so it queues - and
+        // defineSounds() flushes the queue the moment the buffer lands.
+        firePlay('thunder', 1, 0, 1);
+        $bRace.disabled = false;
+    });
+
+    $bReload.addEventListener('click', async () => {
+        $bReload.disabled = true;
+        const wasUnlocked = engine.unlocked().peek();
+        await rebuild(wasUnlocked);
+        $bReload.disabled = false;
+    });
+
+    $bMute.addEventListener('click', () => engine.setMuted(!engine.muted().peek()));
+    $bStopAll.addEventListener('click', () => {
+        engine.stopAll();
+        logPush('stop', 'stopAll(): every voice on every bus');
+    });
+
+    $bTwins.addEventListener('click', () => {
+        engine.stopAll();
+        twinSfx = firePlay('laser', 0.9, -0.6, 1);   // sfx bus, first free channel
+        twinUi = firePlay('click', 0.9, 0.6, 1);     // ui bus, first free channel
+        if (twinSfx < 0 || twinUi < 0) {
+            $twinNote.textContent = 'Unlock the engine on scene 1 first: locked plays queue instead of issuing handles.';
+            return;
+        }
+        const rawSame = (twinSfx >>> 0) === (twinUi >>> 0);
+        $twinNote.textContent =
+            'sfx handle ' + twinSfx + ' and ui handle ' + twinUi + ' differ, but the raw pool handles underneath are ' +
+            hex32(twinSfx) + ' and ' + hex32(twinUi) + ' - ' + (rawSame ? 'identical' : 'different') +
+            '. The bus tag is the only thing keeping stop() from crossing the wire.';
+    });
+
+    $bStopSfx.addEventListener('click', () => {
+        if (twinSfx < 0) {
+            $twinNote.textContent = 'Issue the twin handles first.';
+            return;
+        }
+        engine.stop(twinSfx);
+        const ui = twinUi >= 0 && engine.isPlaying(twinUi);
+        $twinNote.textContent = 'Stopped the sfx voice. ui voice still playing: ' + ui +
+            '. Broadcast stop() would have killed it too - same raw handle, same channel, matching generation.';
+        logPush('stop', 'stop(sfx twin) / ui alive: ' + ui);
+    });
+
+    $bOverrun.addEventListener('click', () => {
+        for (let i = 0; i < 10; i++) firePlay('laser', 0.7, (i / 9) * 2 - 1, 0.9 + i * 0.03);
+    });
+
+    window.addEventListener('keydown', (e) => {
+        if (e.code === 'Escape' && engine) engine.stopAll();
+    });
+
+    $gateBtn.addEventListener('click', async () => {
+        $gateBtn.disabled = true;
+        $gateBtn.textContent = 'synthesizing assets';
+        try {
+            await boot();
+            $gate.hidden = true;
+            requestAnimationFrame(frame);
+        } catch (err) {
+            $gateBtn.textContent = 'failed, see console';
+            console.error(err);
+        }
+    });
+</script>
+
+</body>
+</html>

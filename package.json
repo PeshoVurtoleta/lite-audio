@@ -1,0 +1,66 @@
+{
+  "name": "@zakkster/lite-audio",
+  "version": "1.0.0",
+  "description": "Zero-GC reactive Web Audio engine. Signal-driven buses, ABA-safe voice handles, unlock queue. SFX layer over @zakkster/lite-audio-pool.",
+  "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
+  "license": "MIT",
+  "type": "module",
+  "main": "./Audio.js",
+  "module": "./Audio.js",
+  "types": "./Audio.d.ts",
+  "exports": {
+    ".": {
+      "types": "./Audio.d.ts",
+      "import": "./Audio.js",
+      "node": "./Audio.js",
+      "default": "./Audio.js"
+    }
+  },
+  "files": [
+    "Audio.js",
+    "Audio.d.ts",
+    "llms.txt",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "audio",
+    "webaudio",
+    "sound",
+    "reactive",
+    "signals",
+    "zero-gc",
+    "game-audio",
+    "sfx",
+    "voice-stealing",
+    "unlock",
+    "ios-unlock"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "homepage": "https://github.com/PeshoVurtoleta/lite-audio#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeshoVurtoleta/lite-audio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PeshoVurtoleta/lite-audio/issues",
+    "email": "shinikchiev@yahoo.com"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/PeshoVurtoleta"
+  },
+  "peerDependencies": {
+    "@zakkster/lite-signal": "^1.3.0",
+    "@zakkster/lite-audio-pool": "^1.1.0"
+  },
+  "devDependencies": {
+    "@zakkster/lite-signal": "^1.3.0",
+    "@zakkster/lite-audio-pool": "^1.1.0"
+  }
+}

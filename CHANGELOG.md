@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.1.1
+
+The handle contract, written down, and a zero-GC gate that can see it.
+
+No behaviour change on any hot path — `play()`, `stop()`, and the per-bus write
+effect are byte-identical to 1.1.0, and `test/HashParity.test.js` now fails the
+build if that ever silently stops being true. This release documents a design
+that lived only in a source comment, gives it a type, and closes a blind spot in
+what "zero-GC" was actually being tested against.
+
+### The blind spot
+
+The engine handle is `busIndex * 2^32 + poolHandle`. On bus 0 it is a V8 SMI only
+until a channel's generation passes 8,388,608; on any bus ≥ 1 it is ≥ 2^32 and is
+a boxed double. The zero-GC intent was tested on bus 0 at low generation — exactly
+where the handle is an SMI and nothing boxes — so it could never observe the one
+case it was meant to cover. Measured and now closed: the boxed-double return costs
+nothing detectable in steady state (well under the major-GC and pause budget), so
+the plain-number handle keeps its design and `GEN_MASK` is left at 24 bits. See
+`decisions/0001-handle-namespace.md` for the numbers and the rejected
+alternatives.
+
+### Added
+
+- **`VoiceHandle` branded type** (`Audio.d.ts`). `play()` / `playOpts()` return
+  `VoiceHandle | Skipped`, `playUnique()` returns `VoiceHandle | Skipped |
+  TrackStarted`, and `stop()` / `isPlaying()` / `busOf()` accept that union — so a
+  raw integer or a track name handed to `stop()` is now a compile error, and the
+  `-1` / `-2` sentinels have a documented home in the types.
+- **Handle contract** in `llms.txt` and `README.md`: the four encodings as a
+  table (0 is a real handle, not a null; only negatives mean "nothing"), both bit
+  layouts, the decode, the 2^21 bus ceiling with its exact derivation, and the SMI
+  note.
+- **`test/torture.mjs`** — zero-GC gate (`npm run gate`). Measures the handle
+  return on bus ≥ 1 and past generation 8,388,608, reports `bytesPerOp` per
+  regime, and is falsifiable: `LITEAUDIO_TORTURE_LEAK=1` routes the gated path
+  through the rejected `{bus,handle}`-object design and the gate exits non-zero.
+- **`test/Handles.test.js`** — every encoding pinned by name, including `stop(0)`
+  reaching the real bus-0/channel-0/generation-0 voice, `stop(-2)` staying inert
+  next to a live handle-0 voice, and the real engine leaving SMI range past
+  generation 8,388,608.
+- **`test/HashParity.test.js`** — hashes the source of `play()`, `stop()`, and the
+  per-bus write effect against their 1.1.0 goldens, so a docs-and-tests release
+  cannot touch a hot path unnoticed.
+- **Decision records** `decisions/0001-handle-namespace.md` (the
+  bus-above-32-bits design, rejected alternatives, the measurement, and why
+  `GEN_MASK` is not narrowed) and `decisions/0002-generation-wrap.md` (audio wraps
+  where lite-arena retires, and why the divergence is deliberate).
+
+### Changed
+
+- **`init()` fails closed above 2^21 buses.** A voice handle stops being an exact
+  integer past bus index 2^21 − 1, so a larger bus graph would issue colliding
+  handles; `init()` now throws a `RangeError` instead. `'master'` is implicit and
+  does not count against the ceiling. This is a cold guard — the `play()` / `stop()`
+  hot paths are untouched (proven by `HashParity.test.js`).
+
 ## 1.1.0
 
 The music layer. Streaming tracks via `MediaElementAudioSourceNode` share the

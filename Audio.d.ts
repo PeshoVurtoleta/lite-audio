@@ -20,6 +20,31 @@ export interface WriteSignal<T> extends ReadSignal<T> {
 export type LoadState = 'idle' | 'loading' | 'ready' | 'error';
 export type CtxState = 'suspended' | 'running' | 'interrupted' | 'closed';
 
+declare const __voiceHandle: unique symbol;
+
+/**
+ * An opaque, bus-tagged voice handle returned by play(). At runtime it is a
+ * plain number - `busIndex * 2^32 + poolHandle`, exact well inside 2^53 - but
+ * it is branded so a caller cannot fabricate one, pass a track name where a
+ * handle belongs, or feed an arbitrary integer to stop(). Get one from play()
+ * (or playOpts / playUnique) and hand it back to stop() / isPlaying() / busOf().
+ *
+ * The full return space of the playback methods is a handle OR one of two
+ * negative sentinels, both inert to stop() by construction:
+ *   - `SKIPPED` (-1): the call did nothing - unknown/not-ready sound, locked
+ *     context (the play was queued), or a throttled playUnique().
+ *   - `TRACK_STARTED` (-2): playUnique() started a music TRACK. Tracks are
+ *     singletons addressed by name, so there is no handle to return, and it
+ *     cannot report 0 - that is a real handle (bus 0, channel 0, generation 0).
+ * Zero is therefore never a "nothing happened" value; only negatives are.
+ */
+export type VoiceHandle = number & { readonly [__voiceHandle]: 'VoiceHandle' };
+
+/** play()/playOpts() returned this when nothing was played (see VoiceHandle). */
+export type Skipped = -1;
+/** playUnique() returned this when it started a music track (see VoiceHandle). */
+export type TrackStarted = -2;
+
 export interface SoundConfig {
     /** Source URL list, ordered by preference. First supported extension wins. */
     src: string[];
@@ -123,7 +148,7 @@ export class LiteAudio {
      * generations from zero on its own, so the raw pool handles collide across
      * buses by construction - the bus tag is what makes a handle name one voice.
      */
-    play(soundId: string, volume?: number, pan?: number, pitch?: number): number;
+    play(soundId: string, volume?: number, pan?: number, pitch?: number): VoiceHandle | Skipped;
 
     /**
      * Sugar layer over play(): options object with pitchVar resolution.
@@ -134,16 +159,20 @@ export class LiteAudio {
         pan?: number;
         pitch?: number;
         pitchVar?: number;
-    }): number;
+    }): VoiceHandle | Skipped;
 
-    /** Stop a specific voice by handle. Stale handles are silent no-ops. */
-    stop(handle: number): void;
+    /**
+     * Stop a specific voice by handle. Stale handles are silent no-ops, and the
+     * negative sentinels (Skipped / TrackStarted) are inert by construction, so
+     * a play() or playUnique() result can be passed straight through unchecked.
+     */
+    stop(handle: VoiceHandle | Skipped | TrackStarted): void;
 
     /** Is this exact voice still sounding? False if stolen, stopped, or played out. */
-    isPlaying(handle: number): boolean;
+    isPlaying(handle: VoiceHandle | Skipped | TrackStarted): boolean;
 
-    /** Name of the bus that issued this handle, or null. */
-    busOf(handle: number): string | null;
+    /** Name of the bus that issued this handle, or null (incl. for any sentinel). */
+    busOf(handle: VoiceHandle | Skipped | TrackStarted): string | null;
 
     /**
      * SFX voices sounding on a bus, or across every bus with no argument.
@@ -200,12 +229,13 @@ export class LiteAudio {
      * Play `name` (sound OR track) only if the last play attempt for the
      * same name was more than `thresholdMs` ago. Ported from the manager.
      *
-     * Returns a voice handle for a sound, `-2` for a track (music is a singleton,
-     * addressed by name), and `-1` on threshold rejection or unknown name. It never
-     * returns 0 for a track: 0 is a real handle (bus 0, channel 0, generation 0), and
-     * passing it to stop() would kill an unrelated SFX voice.
+     * Returns a voice handle for a sound, `TrackStarted` (-2) for a track (music is
+     * a singleton, addressed by name), and `Skipped` (-1) on threshold rejection or
+     * unknown name. It never returns 0 for a track: 0 is a real handle (bus 0,
+     * channel 0, generation 0), and passing it to stop() would kill an unrelated
+     * SFX voice.
      */
-    playUnique(name: string, thresholdMs?: number): number;
+    playUnique(name: string, thresholdMs?: number): VoiceHandle | Skipped | TrackStarted;
 
     /** Per-track signals. Undefined for unknown track name. */
     trackLoadState(name: string): ReadSignal<LoadState> | undefined;

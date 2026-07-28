@@ -35,6 +35,19 @@ const RAMP_TC = 0.01;
 const BUS_STRIDE = 4294967296;   // 2^32
 
 /**
+ * Bus ceiling. A handle is busIndex * 2^32 + poolHandle with a FULL uint32 pool
+ * handle in the low half, so it stays a safe integer only while
+ * busIndex * 2^32 + (2^32 - 1) <= 2^53 - 1, i.e. busIndex <= 2^21 - 1. Bus index
+ * 2^21 itself already overflows once its pool issues a maxed-out handle, so the
+ * usable index range is [0, 2^21 - 1] and the bus COUNT ceiling is 2^21. Past it,
+ * two distinct (bus, poolHandle) pairs would round to the same double and stop()
+ * would silently reach the wrong voice. We fail closed at init() instead: an
+ * unrepresentable bus is a wiring error, not a runtime surprise. This is a cold
+ * check (init only) and does not touch the play()/stop() hot paths.
+ */
+const MAX_BUSES = 2097152;       // 2^21
+
+/**
  * playUnique() returns a handle for a sound. Tracks have no handle - they are
  * singletons addressed by name - so it needs a way to say "the track started"
  * that is not a number stop() would act on. It cannot be 0: that is a perfectly
@@ -287,6 +300,21 @@ export class LiteAudio {
             writeStorage(this._mutedKey, muted);
         });
         this._effectHandles.push(masterEffect);
+
+        // Fail closed on an unrepresentable bus count BEFORE building a single
+        // node: a handle can only namespace 2^21 buses (see MAX_BUSES). 'master'
+        // is implicit and never gets an index, so it does not count against the
+        // ceiling.
+        let userBusCount = 0;
+        for (const name of this._busNames) if (name !== 'master') userBusCount++;
+        if (userBusCount > MAX_BUSES) {
+            throw new RangeError(
+                'LiteAudio: ' + userBusCount + ' buses exceeds the handle ceiling of ' +
+                MAX_BUSES + ' (2^21). A voice handle is busIndex * 2^32 + poolHandle and ' +
+                'stops being an exact integer past bus index 2^21 - 1, so a larger bus ' +
+                'graph would issue colliding handles.'
+            );
+        }
 
         // Build each user bus: GainNode -> master, plus a per-bus volume+muted
         // effect that writes to gain via setTargetAtTime.

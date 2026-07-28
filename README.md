@@ -97,6 +97,40 @@ Handles stay plain numbers, exact well inside `2^53`, so `-1` still means "no vo
 `-2`: tracks are name-addressed singletons with no handle, and `0` was never
 available as a "nothing" value — it is a real voice.
 
+### The four encodings
+
+One `number`, four kinds of value. Typed as `VoiceHandle | Skipped | TrackStarted`
+in the `.d.ts` — `VoiceHandle` is a *branded* number, so a raw integer or a track
+name cannot be handed to `stop()` by mistake.
+
+| Value                      | Meaning                                          | `stop()` acts on it? |
+| -------------------------- | ------------------------------------------------ | -------------------- |
+| `0`                        | a **real** handle — bus 0, channel 0, generation 0 | yes                |
+| `busIndex * 2^32 + pool`   | every other real handle                          | yes                  |
+| `-1` (`Skipped`)           | nothing played — unknown/not-ready sound, locked context (queued), or throttled `playUnique()` | no |
+| `-2` (`TrackStarted`)      | `playUnique()` started a music **track**         | no                   |
+
+Because `0` is real, "nothing happened" is only ever a **negative**, and negatives
+are inert to `stop()` by construction — a `play()` or `playUnique()` result is safe
+to pass straight to `stop()` without a guard.
+
+### Layout and limits
+
+- **Bit layout.** Pool handle `[gen:24][channel:8]` (`((gen << 8) | channel) >>> 0`);
+  engine handle `busIndex * 2^32 + poolHandle`. Decode with `(h / 2^32) | 0` and
+  `h >>> 0`.
+- **Bus ceiling: `2^21`.** The low half is a full `uint32`, so a handle is an exact
+  integer only while `busIndex ≤ 2^21 - 1` — index `2^21` itself already overflows
+  `2^53`. `init()` throws a `RangeError` above `2^21` user buses instead of issuing
+  colliding handles (`'master'` is implicit and doesn't count).
+- **SMI range.** A handle leaves V8's small-integer range on any bus `≥ 1`, and on
+  bus 0 once a channel's generation passes `8,388,608` (~hours of continuous
+  stealing on one channel). The boxed-double cost is below the zero-GC gate's
+  resolution — measured in [`decisions/0001`](decisions/0001-handle-namespace.md).
+  The generation counter **wraps** at `2^24` rather than retiring the channel, a
+  deliberate divergence from lite-arena documented in
+  [`decisions/0002`](decisions/0002-generation-wrap.md).
+
 ## Why not Howler?
 
 Howler.js is a good general-purpose audio library. It handles decoding, HTML5
@@ -225,11 +259,34 @@ notes for that.
 npm test
 ```
 
-75 tests across 18 suites. The unlock state machine (including `'interrupted'`),
+87 tests across 25 suites. The unlock state machine (including `'interrupted'`),
 loader fallback + error, bus writes as `setTargetAtTime`, pool delegation (steal,
 generation no-op on stale handles, bus scope), unlock queue semantics
 (latest-per-sound, bounded), destroy idempotency — plus the whole music layer
-(`test/Tracks.test.js`) and the bus-handle namespace (`test/BusHandles.test.js`).
+(`test/Tracks.test.js`), the bus-handle namespace (`test/BusHandles.test.js`), and
+the handle contract (`test/Handles.test.js`): every encoding pinned by name,
+including `stop(0)` reaching the real bus-0 voice, `stop(-2)` staying inert, the
+real engine leaving SMI range past generation 8,388,608, and the `2^21` bus
+ceiling failing closed.
+
+### Zero-GC gate
+
+```bash
+node --expose-gc test/torture.mjs
+```
+
+Measures the handle return on bus `≥ 1` and past generation `8,388,608` — the
+cases where it leaves SMI range and where the old bus-0/low-gen gate was blind —
+reports `bytesPerOp` per regime, and is **falsifiable**:
+
+```bash
+LITEAUDIO_TORTURE_LEAK=1 node --expose-gc test/torture.mjs   # exits non-zero
+```
+
+routes the gated path through the rejected `{bus,handle}`-object design so a pass
+means the gate can actually see allocation. `test/HashParity.test.js` locks
+`play()`, `stop()`, and the per-bus write effect byte-for-byte, so a "docs" release
+cannot quietly touch a hot path.
 
 The mock harness (`test/mock-ctx.js`) records every `AudioParam` scheduled event
 into an inspectable `.events` array **and settles `.value` on whatever the

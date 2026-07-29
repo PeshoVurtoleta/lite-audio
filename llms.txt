@@ -20,7 +20,7 @@ import { LiteAudio } from '@zakkster/lite-audio';
 - Positional hot path for SFX: play(soundId, volume, pan, pitch) - no options object per call
 - SFX handles are bus-tagged: busIndex * 2^32 + poolHandle. Raw pool handles collide across buses (every pool starts at channel 0 / generation 0), so the tag is what makes stop() name one voice
 - Music tracks are singletons addressed by name, not handle - stopTrack('menu_bg') not stop(handle)
-- v1.2.0 ships SFX + music + mix intelligence (ducking, snapshots, auto-suspend, per-bus meters, dynamic buses). Howler-shim compat subpath is v2.0.0.
+- v2.0.0 ships SFX + music + mix intelligence (ducking, snapshots, auto-suspend, per-bus meters, dynamic buses) + a `./compat` drop-in for lite-audio-manager (the Howler overlay). Migrate by changing one import; no Howler underneath.
 - Mix automation lives on a per-bus sidechain gain (gain -> duckGain -> master) so ducking and snapshot morphs compose with volume/mute instead of fighting for one AudioParam. Meters / duck follower / auto-suspend share one cold ~10 Hz monitor that never touches play()/stop().
 
 ## Quick Start
@@ -114,6 +114,15 @@ level(bus): ReadSignal<number> RMS at ~10 Hz, or null on an unmetered/unknown bu
 enableAutoSuspend({after=30}): suspend the context after N silent seconds; a later play() wakes it (bare resume(), native scheduler holds the voice). Returns false and stays off on iOS (un-unlock hazard). disableAutoSuspend(), isAutoSuspended().
 
 Design records: decisions/0003-ducking, 0004-snapshots, 0005-auto-suspend, 0006-dynamic-bus.
+
+### Compat: lite-audio-manager drop-in (v2.0.0)
+
+Import path: `@zakkster/lite-audio/compat`. Exports `AudioManager` (class) and `audioManager` (singleton), extends EventTarget. A game on the unscoped `lite-audio-manager` (Howler overlay) migrates by changing one import; the shim is a pure adapter over lite-audio, no Howler.
+
+- Surface: init / play / playExclusive / playUnique / stop / stopCategory / stopCategories / setMuted / destroy, `isMuted` / `isUnlocked`, the `'mutechange'` CustomEvent, and the same `lite_audio_muted` storage key (mute preference migrates in both directions). An `engine` getter exposes the underlying LiteAudio.
+- Classification: a config sound with `loop` or `html5` maps to a streamed lite-audio track (real fades); everything else to a pooled SFX voice. Categories become buses (one per distinct category, auto-created); a stopCategory for a category no sound declared is a silent no-op.
+- Divergences (documented, tested): pre-unlock play() returns null but is KEPT and flushed on unlock (DIV-1); stop fade is honored for tracks, inert for pooled SFX (DIV-2); active ids pruned by an isPlaying sweep, not an end event (DIV-3); one Howl type becomes two engine types (DIV-4).
+- init() is a synchronous facade over async decode; await whenReady() to assert on a loaded sound. See PARITY.md and decisions/0007-compat-shim.md.
 
 ### Reactive readables
 `ctxState() : ReadSignal<'suspended'|'running'|'interrupted'|'closed'>`

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { LiteAudio } from '../Audio.js';
 import {
     createMockContext, mockFetch, mockDocument, mockScheduler, flushMicrotasks, paramEvents,
+    mockAudioElement,
 } from './mock-ctx.js';
 
 // ---------------------------------------------------------------------------
@@ -497,5 +498,135 @@ describe('destroy() with tracks', () => {
 
         audio.destroy();
         assert.equal(clock.pending(), 0);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// AU2 edge: the one <audio> element -> one MediaElementAudioSourceNode rule.
+// A given element can back exactly ONE source node for its lifetime; a second
+// createMediaElementSource on it throws InvalidStateError. lite-audio creates
+// its own elements and never reuses one, but a destroy() -> re-init cycle on a
+// HOST that pools elements is the path that hits this. See PARITY.md.
+// ---------------------------------------------------------------------------
+
+/** A context that records createMediaElementSource calls and, optionally,
+ *  enforces the spec's one-source-per-element rule by throwing on reuse. */
+function sourceTrackingCtx({ throwOnReuse = false } = {}) {
+    const ctx = createMockContext({ state: 'suspended' });
+    const sourced = new Set();
+    let calls = 0;
+    const orig = ctx.createMediaElementSource;
+    ctx.createMediaElementSource = (el) => {
+        calls++;
+        if (throwOnReuse && sourced.has(el)) {
+            const e = new Error('createMediaElementSource: element already connected');
+            e.name = 'InvalidStateError';
+            throw e;
+        }
+        sourced.add(el);
+        return orig(el);
+    };
+    ctx._mesCalls = () => calls;
+    return ctx;
+}
+
+/** A document that hands back the SAME <audio> element every time, standing in
+ *  for a host that pools/reuses media elements across engine lifetimes. */
+function reusingDocument() {
+    const el = mockAudioElement();
+    return {
+        hidden: false,
+        created: [],
+        createElement(tag) {
+            if (tag !== 'audio') throw new Error('reusingDocument: unexpected <' + tag + '>');
+            this.created.push(el);
+            return el;
+        },
+        addEventListener() {},
+        removeEventListener() {},
+    };
+}
+
+describe('reused <audio> element (destroy -> re-init)', () => {
+    it('wires the element source exactly once per track within a session', async () => {
+        const ctx = sourceTrackingCtx();
+        const win = fakeWindow();
+        const audio = new LiteAudio({
+            buses: ['music'], window: win, document: mockDocument(),
+            fetch: mockFetch({}),
+        });
+        await audio.init(ctx);
+        await audio.defineTracks({ theme: { src: ['/theme.mp3'], bus: 'music' } });
+        win.fire();
+        await flushMicrotasks(8);
+
+        audio.playTrack('theme');
+        audio.stopTrack('theme', { fade: 0 });
+        audio.playTrack('theme');           // replay must NOT re-source the element
+        assert.equal(ctx._mesCalls(), 1, 'the rec.source guard blocks a second wiring');
+        audio.destroy();
+    });
+
+    it('fails a track closed when handed a spent/reused element, without throwing', async () => {
+        const win = fakeWindow();
+        const ctx = sourceTrackingCtx({ throwOnReuse: true });
+        const doc = reusingDocument();      // one element, shared across both engines
+        const mk = () => new LiteAudio({
+            buses: ['music'], window: win, document: doc, fetch: mockFetch({}),
+        });
+
+        // Engine A wires the shared element once and tears down.
+        const a = mk();
+        await a.init(ctx);
+        await a.defineTracks({ theme: { src: ['/theme.mp3'], bus: 'music' } });
+        win.fire();
+        await flushMicrotasks(8);
+        a.playTrack('theme');
+        assert.ok(a._tracks.get('theme').source, 'first engine wired the element');
+        a.destroy();
+
+        // Engine B, same context, gets the SAME element back. A real browser
+        // throws InvalidStateError on the second createMediaElementSource; the
+        // engine must catch it and fail the track closed rather than throw into
+        // the caller's playTrack().
+        const b = mk();
+        await b.init(ctx);
+        await b.defineTracks({ theme: { src: ['/theme.mp3'], bus: 'music' } });
+        win.fire();
+        await flushMicrotasks(8);
+
+        assert.doesNotThrow(() => b.playTrack('theme'));
+        assert.equal(b._tracks.get('theme').loadState.peek(), 'error', 'track failed closed');
+        assert.equal(b._tracks.get('theme').playing.peek(), false, 'nothing started');
+        b.destroy();
+    });
+
+    it('a fresh element (the normal re-init) plays cleanly after destroy', async () => {
+        const win = fakeWindow();
+        const ctx = sourceTrackingCtx({ throwOnReuse: true });
+        const mk = () => new LiteAudio({
+            buses: ['music'], window: win, document: mockDocument(),   // fresh elements
+            fetch: mockFetch({}),
+        });
+
+        const a = mk();
+        await a.init(ctx);
+        await a.defineTracks({ theme: { src: ['/theme.mp3'], bus: 'music' } });
+        win.fire();
+        await flushMicrotasks(8);
+        a.playTrack('theme');
+        a.destroy();
+
+        // A new engine with its own document creates a new element - no reuse,
+        // no collision. This is the scene-reload path, and it must just work.
+        const b = mk();
+        await b.init(ctx);
+        await b.defineTracks({ theme: { src: ['/theme.mp3'], bus: 'music' } });
+        win.fire();
+        await flushMicrotasks(8);
+        b.playTrack('theme');
+        assert.ok(b._tracks.get('theme').source, 'fresh element wired');
+        assert.equal(b._tracks.get('theme').playing.peek(), true);
+        b.destroy();
     });
 });

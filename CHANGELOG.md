@@ -1,5 +1,73 @@
 # Changelog
 
+## 2.0.0
+
+The Howler retirement. A game built on `lite-audio-manager` (the Howler.js
+overlay) now migrates to this engine by changing exactly one import — and drops
+a runtime dependency doing it, because the shim is a pure adapter over
+lite-audio, with no Howler underneath.
+
+```diff
+- import { audioManager } from 'lite-audio-manager';
++ import { audioManager } from '@zakkster/lite-audio/compat';
+```
+
+The major is the milestone, not a break: `./compat` is a purely **additive**
+subpath and the core surface is byte-for-byte unchanged. `play()`, `stop()` and
+the per-bus write effect keep their `HashParity` locks; the zero-GC gate and all
+of 1.2.0's mix features stay green.
+
+### Why it is real and not a claim
+
+Parity is a statement about another package's entire 347-line surface, so it is
+only true if it is tested. [`PARITY.md`](PARITY.md) maps every manager member to
+the lite-audio path behind it and to the test id that proves it;
+[`test/Compat.test.js`](test/Compat.test.js) runs the manager's own ~45
+expectations — ported from its Vitest suite to `node:test` — against the real
+engine. A row without a test id is not a parity claim.
+
+### Added
+
+- **`./compat` subpath.** `AudioManager` class + `audioManager` singleton,
+  `extends EventTarget`, same `init`/`play`/`playExclusive`/`playUnique`/`stop`/
+  `stopCategory`/`stopCategories`/`setMuted`/`destroy` surface, same `isMuted`/
+  `isUnlocked` flags, same `'mutechange'` CustomEvent, and the same
+  `lite_audio_muted` storage key — so a mute preference written by the manager is
+  read here and vice versa. An `engine` getter exposes the underlying `LiteAudio`
+  for code ready to move past the manager surface.
+- **Reused-`<audio>`-element hardening.** A given element can back exactly one
+  `MediaElementAudioSourceNode` for its lifetime; a `destroy()` → re-init cycle on
+  a host that pools elements is the path that throws `InvalidStateError`. Track
+  wiring now fails that track closed (`loadState: 'error'`) instead of throwing
+  into `playTrack()`. Off every hot path (first-play wiring only).
+
+### The impedance match (documented divergences, all tested)
+
+The manager wraps everything in one `Howl`; lite-audio splits pooled one-shot
+SFX from streamed music tracks. The shim **classifies**: a `loop`/`html5` sound
+becomes a real streamed track (with real fades — the value-add), everything else
+a pooled SFX voice. Categories become buses (auto-created per distinct
+category; an unknown category stops nothing, never everything). Pre-unlock plays
+are **kept**, not dropped — `play()` returns the `null` skip-sentinel but the
+play survives to unlock, so the migrant gains lite-audio's unlock queue. Full
+reasoning in [`decisions/0007-compat-shim.md`](decisions/0007-compat-shim.md);
+each divergence (`DIV-1`..`DIV-4`) has a test.
+
+### Bundle size, stated honestly
+
+Compared minified-and-gzipped, the way a bundler ships it — the shipped files
+carry full JSDoc a minifier strips. The compat path: `Audio.js` ~7.4 KB +
+`Compat.js` ~1.6 KB ≈ **~9 KB gzipped**. The stack it replaces:
+`lite-audio-manager` ~1.5 KB + Howler `~9 KB` (published `howler.core.min.js`,
+gzipped) ≈ **~10.5 KB gzipped**. So the compat path is *smaller* than the Howler
+stack, drops a runtime dependency, and is a strict superset (a bus graph,
+streamed tracks on that graph, equal-power crossfade, ducking, snapshots,
+per-bus meters, zero-GC voice handles). The lite-audio figures are measured here
+(comments stripped, gzipped, as a proxy for a real minifier); Howler's is its
+published minified size, as Howler is not vendored in this repo. The *shipped*
+(commented) files are larger — 22.4 KB + 5.7 KB gzipped — because they ship as
+readable source; that is what a bundler minifies away.
+
 ## 1.2.0
 
 Mix intelligence: ducking, snapshots, auto-suspend, per-bus meters — none of

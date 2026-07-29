@@ -905,7 +905,22 @@ export class LiteAudio {
         const busRec = this._buses.get(rec.busName);
         if (!busRec) return;
 
-        rec.source = this._ctx.createMediaElementSource(rec.element);
+        // A given <audio> element can back exactly ONE MediaElementAudioSourceNode
+        // for its lifetime; a second createMediaElementSource on the same element
+        // throws InvalidStateError. lite-audio creates its own elements and never
+        // reuses one, so a single engine is safe (and the rec.source guard above
+        // blocks re-wiring a track). But a destroy() -> re-init cycle on a HOST
+        // that pools <audio> nodes can hand us a spent element - fail the track
+        // closed rather than throw into the caller's playTrack()/crossfade() path.
+        // This is off every hot path (first-play wiring only). See PARITY.md.
+        let source;
+        try {
+            source = this._ctx.createMediaElementSource(rec.element);
+        } catch {
+            rec.loadState.set('error');
+            return;
+        }
+        rec.source = source;
         rec.xfadeGain = this._ctx.createGain();
         rec.xfadeGain.gain.value = 0;                // start silent, fade in
         rec.volumeGain = this._ctx.createGain();
@@ -942,6 +957,10 @@ export class LiteAudio {
         if (rec.playing.peek() && !opts.restart) return;
 
         this._wireTrackGraph(rec);
+        // Wiring can fail closed (a spent/reused <audio> element - see
+        // _wireTrackGraph). No graph, nothing to play; the loadState is already
+        // 'error'. Bail before touching the null xfade/volume gains.
+        if (!rec.source) return;
 
         // Cancel any pending pause from a previous stopTrack - we're back.
         if (rec.pauseTimer != null) {

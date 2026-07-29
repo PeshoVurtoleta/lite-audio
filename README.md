@@ -25,10 +25,10 @@ that eventually deprecates the Howler wrapper it replaces.
   bounded pre-unlock play queue the manager could not offer from Howler's outside
 
 **Status:** v1.0.0 covers SFX; v1.1.0 added the music streaming layer
-(`MediaElementAudioSourceNode`, crossfades, exclusive/unique); **v1.2.0 adds mix
-intelligence** — ducking, snapshots, auto-suspend, per-bus meters, dynamic buses.
-A Howler-shim compat subpath and full parity certification against
-`lite-audio-manager` are v2.0.0.
+(`MediaElementAudioSourceNode`, crossfades, exclusive/unique); v1.2.0 added mix
+intelligence — ducking, snapshots, auto-suspend, per-bus meters, dynamic buses;
+**v2.0.0 ships the `./compat` drop-in** for `lite-audio-manager` with full parity
+certification. Migrate off the Howler overlay by changing one import.
 
 ## Install
 
@@ -321,9 +321,23 @@ The persistence key (`lite_audio_muted`), unlock event set (`touchstart`,
 unlock pulse are byte-identical to the manager. A migration should keep the
 player's saved mute preference intact on first launch.
 
-A `./compat` subpath re-exporting an `AudioManager`-shaped adapter over
-`LiteAudio` is planned for **v2.0.0**; the migration guide will be the release
-notes for that.
+### The one-import swap (v2.0.0)
+
+```diff
+- import { audioManager } from 'lite-audio-manager';
++ import { audioManager } from '@zakkster/lite-audio/compat';
+```
+
+`./compat` exports an `AudioManager`-shaped adapter over `LiteAudio` — same
+`init`/`play`/`playExclusive`/`playUnique`/`stop`/`stopCategory`/`setMuted`/
+`destroy` surface, same `isMuted`/`isUnlocked`, same `'mutechange'` event, same
+`lite_audio_muted` key. No Howler underneath: the swap *removes* a runtime
+dependency. Every manager member is mapped to its lite-audio path and a test id
+in [`PARITY.md`](PARITY.md); the deliberate divergences (a migrant's looping/
+`html5` sounds become real streamed tracks; categories become buses; pre-unlock
+plays are kept and queued rather than dropped) are documented and tested, with
+the reasoning in [`decisions/0007-compat-shim.md`](decisions/0007-compat-shim.md).
+Full migration guide: [`MIGRATION.md`](MIGRATION.md).
 
 ## Testing
 
@@ -331,7 +345,7 @@ notes for that.
 npm test
 ```
 
-108 tests across 31 suites. The unlock state machine (including `'interrupted'`),
+152 tests across 43 suites. The unlock state machine (including `'interrupted'`),
 loader fallback + error, bus writes as `setTargetAtTime`, pool delegation (steal,
 generation no-op on stale handles, bus scope), unlock queue semantics
 (latest-per-sound, bounded), destroy idempotency — plus the whole music layer

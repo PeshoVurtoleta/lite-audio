@@ -64,6 +64,25 @@ export function mockPanner() {
     return n;
 }
 
+/**
+ * AnalyserNode stand-in for the meter path. getFloatTimeDomainData fills the
+ * caller's array with a constant `_fill` (default 0 = silence), so a test can
+ * drive a known RMS: the RMS of a constant c is |c|, so `_fill = 0.5` yields a
+ * level() of 0.5. `_fill` is settable per node; the same array is written in
+ * place every call, which is how the zero-alloc-per-read claim is testable.
+ */
+export function mockAnalyser(fftSize = 2048) {
+    const n = baseNode('analyser');
+    n.fftSize = fftSize;
+    n.frequencyBinCount = fftSize >> 1;
+    n._fill = 0;
+    n.getFloatTimeDomainData = (arr) => {
+        for (let i = 0; i < arr.length; i++) arr[i] = n._fill;
+        return arr;
+    };
+    return n;
+}
+
 export function mockBufferSource() {
     const n = baseNode('source');
     n.buffer = null;
@@ -198,6 +217,7 @@ export function createMockContext({ sampleRate = 44100, state = 'suspended' } = 
         createBufferSource: () => mockBufferSource(),
         createBuffer: (ch, len, sr) => mockAudioBuffer(ch, len, sr),
         createMediaElementSource: (el) => mockMediaElementSource(el),
+        createAnalyser: () => mockAnalyser(),
 
         async resume() {
             if (ctxState === 'closed') throw new Error('Cannot resume closed context');

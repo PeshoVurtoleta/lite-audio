@@ -90,6 +90,34 @@ export interface PlayExclusiveOptions extends PlayTrackOptions {
     fade?: number;
 }
 
+export interface DuckOptions {
+    /** Dip time constant (seconds). Default 0.05. */
+    attack?: number;
+    /** Recovery time constant (seconds), remembered for the matching stopDuck. Default 0.3. */
+    release?: number;
+}
+
+export interface DuckOnOptions {
+    /** Voices on the trigger bus required to engage the duck. Default 1. */
+    threshold?: number;
+    /** Ducked multiplier for the target bus (0..1). Default 0.3. */
+    level?: number;
+    /** Dip time constant (seconds). Default 0.05. */
+    attack?: number;
+    /** Recovery time constant (seconds). Default 0.3. */
+    release?: number;
+}
+
+export interface CreateBusOptions {
+    /** Tap an AnalyserNode for level() readouts. Default false (no analyser allocated). */
+    meter?: boolean;
+}
+
+export interface AutoSuspendOptions {
+    /** Silent seconds before the context is suspended. Default 30. */
+    after?: number;
+}
+
 export interface LiteAudioOptions {
     /**
      * User-facing bus names. Do not include 'master' - it is always the top
@@ -247,6 +275,61 @@ export class LiteAudio {
     setBusVolume(busName: string, volume: number): void;
     setBusMuted(busName: string, muted: boolean): void;
     setMuted(state: boolean): void;
+
+    // ---------- Mix intelligence (v1.2.0) ----------------------------------
+
+    /**
+     * Dip a bus to `level` (a 0..1 multiplier applied under its volume/mute) over
+     * an attack time constant. The manual, always-wins duck: it latches the bus
+     * out of any duckOn follower until stopDuck() releases it. See decisions/0003.
+     */
+    duck(busName: string, level?: number, opts?: DuckOptions): void;
+
+    /** Release a manual duck to rest over the release TC, clearing the manual latch. */
+    stopDuck(busName: string, opts?: { release?: number }): void;
+
+    /**
+     * Automatic follower: while `triggerBus` has >= threshold voices sounding, dip
+     * `targetBus`. Evaluated off the hot path (~10 Hz), edge-only. An explicit
+     * duck()/stopDuck() on the target always wins.
+     */
+    duckOn(triggerBus: string, targetBus: string, opts?: DuckOnOptions): void;
+
+    /** Capture the current mix (every bus's volume + mute) under `name`. Track
+     *  volumes are not captured. See decisions/0004. */
+    captureSnapshot(name: string): void;
+
+    /**
+     * Morph the mix to a captured snapshot over `ms`. Signals become truthful
+     * immediately; the audible transition rides the sidechain and is continuous
+     * from the actual current level, so a mid-morph apply is click-free. `ms` of 0
+     * snaps via the signals. Inert for an unknown name.
+     */
+    applySnapshot(name: string, ms?: number): void;
+
+    /**
+     * Create a bus after init(). Idempotent; rejects the reserved name 'master';
+     * fails closed (RangeError) at the 2^21 handle ceiling. `{ meter: true }` taps
+     * an AnalyserNode for level(). A bus gets its pool when a sound is first routed
+     * to it via defineSounds(). See decisions/0006.
+     */
+    createBus(name: string, opts?: CreateBusOptions): unknown;
+
+    /** A metered bus's level signal (RMS, ~10 Hz), or null on an unmetered/unknown bus. */
+    level(busName: string): ReadSignal<number> | null;
+
+    /**
+     * Arm auto-suspend: after `after` silent seconds the context is suspended; a
+     * later play() resumes it. Off by default, and refused on iOS (returns false).
+     * See decisions/0005.
+     */
+    enableAutoSuspend(opts?: AutoSuspendOptions): boolean;
+
+    /** Disarm auto-suspend. Does not resume a context already suspended. */
+    disableAutoSuspend(): void;
+
+    /** True while the context is suspended by our auto-suspend (not the app/OS). */
+    isAutoSuspended(): boolean;
 
     // ---------- Reactive readables -----------------------------------------
     /** Current AudioContext state signal. */

@@ -21,6 +21,25 @@ const FADE_SECONDS = 0.02;
 const RAMP_TC = 0.01;
 
 /**
+ * Ducking time constants (D-A3). A duck is a sidechain compressor's key path:
+ * activity on one bus dips another. The dip and the recovery are NOT symmetric
+ * - a duck that attacks and releases at the same rate sounds like a mistake,
+ * because the ear expects music to get out of the way FAST and return SLOWLY.
+ * These are setTargetAtTime time constants (seconds), the same exponential
+ * primitive the bus writes use, which is exactly a compressor's attack/release.
+ * Attack ~50ms is snappy without a click; release ~300ms lets the mix breathe
+ * back. Overridable per duck() call.
+ */
+const DUCK_ATTACK_TC = 0.05;
+const DUCK_RELEASE_TC = 0.3;
+
+/** Ducking lives on a dedicated sidechain gain, multiplied under volume/mute.
+ *  1 is "not ducked"; a duck dips it toward its target level and stopDuck()
+ *  restores it to this. Kept as a named constant so the resting value has one
+ *  source of truth across duck(), stopDuck() and snapshot morphs. */
+const DUCK_REST = 1;
+
+/**
  * Handle namespace. A pool handle is a full uint32 - [gen:24][channel:8] - with no
  * spare bits, and every bus runs its own pool counting generations from zero. So the
  * first play on EVERY bus returns the same uint32 (channel 0, generation 0), and a
@@ -122,6 +141,16 @@ function scaleCurve(base, delta, start) {
 
 /** Position signal write throttle: >= 100 ms of ctx time between writes. */
 const POSITION_WRITE_INTERVAL = 0.1;
+
+/**
+ * Shared monitor tick, ~10 Hz. One low-frequency timer drives meters, the duck
+ * follower and auto-suspend - none of them belong on the play()/stop() hot
+ * path, and none of them needs sample accuracy. 10 Hz matches the telemetry
+ * cadence position() already uses and is fast enough for a follower to track a
+ * voice burst. The tick is allocation-free: the callback is created once and
+ * reschedules itself by reference.
+ */
+const MONITOR_INTERVAL_MS = 100;
 
 /** Default fade durations in seconds (converted to ms at the API boundary). */
 const DEFAULT_TRACK_FADE_MS = 200;
@@ -238,6 +267,10 @@ export class LiteAudio {
         // singletons - one instance per registered name. See _makeTrackRecord.
         this._tracks = new Map();
 
+        // Flat list of the same track records, so the monitor can scan for a
+        // playing track without allocating a Map iterator every tick.
+        this._trackList = [];
+
         // Timestamp map for playUnique(). Manager parity: keyed by name, holds
         // performance.now() (or ctx-clock fallback). Applies to sounds AND tracks.
         this._lastPlayed = new Map();
@@ -252,6 +285,31 @@ export class LiteAudio {
 
         // Effect handles kept so destroy() can dispose them cleanly.
         this._effectHandles = [];
+
+        // Automatic-duck rules (duckOn). Evaluated off the hot path by the
+        // shared monitor; an explicit duck() latches its target out of these.
+        this._duckRules = [];
+
+        // Named mix snapshots (captureSnapshot / applySnapshot).
+        this._snapshots = new Map();
+
+        // Buses with an AnalyserNode attached (createBus({meter:true})). Held
+        // as a flat list so the monitor can sweep meters without a Map walk.
+        this._meteredBuses = [];
+
+        // Shared cold monitor: one low-frequency timer that drives meters, the
+        // duck follower and auto-suspend. Off until a consumer needs it, and
+        // started at most once (idempotent).
+        this._monitorTimer = null;
+        this._monitorTick = null;   // the reused, allocation-free tick closure
+
+        // Auto-suspend state. Off by default and hard-off on iOS (a suspend ->
+        // resume there can demand a fresh user gesture, silently un-unlocking a
+        // page that was working). See enableAutoSuspend().
+        this._autoSuspend = false;
+        this._autoSuspendAfter = 0;      // seconds of silence before suspending
+        this._silentSince = -1;          // ctx time silence began, -1 = not silent
+        this._selfSuspended = false;     // WE suspended it (vs the app / OS)
 
         // Unlock/lifecycle AbortControllers - same shape as the manager.
         this._unlockAbort = null;
@@ -320,23 +378,7 @@ export class LiteAudio {
         // effect that writes to gain via setTargetAtTime.
         for (const name of this._busNames) {
             if (name === 'master') continue;    // reserved name; use master directly
-            const gain = this._ctx.createGain();
-            gain.connect(this._master);
-            const sVol = signal(1);
-            const sMut = signal(false);
-            const busEffect = effect(() => {
-                const v = sVol();
-                const m = sMut();
-                const target = m ? 0 : v;
-                gain.gain.setTargetAtTime(target, this._ctx.currentTime, RAMP_TC);
-            });
-            this._effectHandles.push(busEffect);
-            const busRec = {
-                index: this._busList.length,
-                gain, volume: sVol, muted: sMut, effect: busEffect, pool: null,
-            };
-            this._buses.set(name, busRec);
-            this._busList.push(busRec);
+            this._buildBus(name);
         }
 
         // Ctx state effect: mirror external state changes into our signal so
@@ -352,6 +394,63 @@ export class LiteAudio {
         if (this._document) this._setupVisibilityResume();
 
         this._initialized = true;
+    }
+
+    /**
+     * Build one user bus and append it to the bus list. Shared by init() (the
+     * static buses from opts.buses) and createBus() (dynamic buses). The graph
+     * per bus is:
+     *
+     *   pool/track -> gain (volume + mute) -> duckGain (sidechain) -> master
+     *
+     * Volume and mute own gain.gain via a signal effect. Ducking and snapshot
+     * morphs own duckGain.gain. Keeping the two automations on SEPARATE params
+     * is the whole point: a duck and a volume change compose (they multiply
+     * through the graph) instead of fighting for one AudioParam, where the last
+     * writer would win and the next effect run would clobber the duck.
+     *
+     * @param {string} name
+     * @param {Object} [opts]
+     * @param {boolean} [opts.meter] - tap an AnalyserNode for level() readouts.
+     * @returns {Object} the bus record.
+     */
+    _buildBus(name, opts = {}) {
+        const gain = this._ctx.createGain();
+        const duckGain = this._ctx.createGain();
+        duckGain.gain.value = DUCK_REST;
+        gain.connect(duckGain);
+        duckGain.connect(this._master);
+
+        const sVol = signal(1);
+        const sMut = signal(false);
+        const busEffect = effect(() => {
+            const v = sVol();
+            const m = sMut();
+            const target = m ? 0 : v;
+            gain.gain.setTargetAtTime(target, this._ctx.currentTime, RAMP_TC);
+        });
+        this._effectHandles.push(busEffect);
+
+        const busRec = {
+            index: this._busList.length,
+            gain, duckGain, volume: sVol, muted: sMut, effect: busEffect, pool: null,
+            // Ducking state. `duckManual` latches when a caller invokes duck()
+            // explicitly: while set, the automatic follower leaves this bus
+            // alone, so an explicit duck always wins (and stopDuck() clears it).
+            // `duckRelease` remembers the release TC across a duck()/stopDuck()
+            // pair so the recovery honours the rate the duck was created with.
+            duckManual: false,
+            duckRelease: DUCK_RELEASE_TC,
+            // Metering state, populated by createBus({meter:true}). analyser is
+            // null on an unmetered bus and no AnalyserNode is ever allocated.
+            analyser: null,
+            meterBuffer: null,
+            level: null,
+        };
+        this._buses.set(name, busRec);
+        this._busList.push(busRec);
+        if (opts.meter) this._attachMeter(busRec);
+        return busRec;
     }
 
     /**
@@ -539,6 +638,14 @@ export class LiteAudio {
         const busRec = this._buses.get(rec.busName);
         if (!busRec || !busRec.pool) return -1;
 
+        // Wake from our own auto-suspend. One monomorphic boolean read on the
+        // common (false) branch - no allocation, no await, no microtask. The
+        // source we schedule below onto a still-frozen clock is pinned by the
+        // spec to the resume boundary and plays from its head, so the native
+        // scheduler holds this voice while the hardware spins up. See
+        // decisions/0005-auto-suspend.md.
+        if (this._selfSuspended) this._wakeFromAutoSuspend();
+
         // Per-play buffer override (pool v1.1.0): the pool is constructed
         // with a dummy default buffer; we always pass the sound's own buffer.
         const poolHandle = busRec.pool.play(soundId, volume, pan, pitch, rec.buffer);
@@ -692,6 +799,7 @@ export class LiteAudio {
 
             const rec = this._makeTrackRecord(name, cfg, busName);
             this._tracks.set(name, rec);
+            this._trackList.push(rec);
             loadPromises.push(this._loadTrack(rec));
         }
         await Promise.all(loadPromises);
@@ -1107,6 +1215,257 @@ export class LiteAudio {
 
     setMuted(state) { this._sMuted.set(!!state); }
 
+    // ---------- Ducking (v1.2.0) -------------------------------------------
+
+    /**
+     * Duck a bus: dip its sidechain gain to `level` over an attack time
+     * constant. `level` is a 0..1 multiplier applied UNDER the bus's own
+     * volume and mute (they live on separate AudioParams and compose), so a
+     * ducked-and-muted bus is still silent and a duck survives a volume change.
+     *
+     * This is the manual, always-wins primitive. It latches the bus out of any
+     * automatic follower (duckOn) until stopDuck() releases it - an automatic
+     * duck a caller cannot override is a bug report waiting to be filed.
+     *
+     * `level` 0 approaches silence but, like every bus write, never reaches it
+     * (setTargetAtTime is exponential); 1 is no duck. attack/release are time
+     * constants in seconds. release is remembered for the matching stopDuck().
+     * @param {string} busName
+     * @param {number} [level=0] - target sidechain multiplier, 0..1
+     * @param {Object} [opts]
+     * @param {number} [opts.attack] - dip time constant, seconds
+     * @param {number} [opts.release] - recovery time constant, seconds (remembered)
+     */
+    duck(busName, level = 0, opts = {}) {
+        if (this._destroyed) return;
+        const busRec = this._buses.get(busName);
+        if (!busRec) return;
+        const attack = opts.attack ?? DUCK_ATTACK_TC;
+        if (opts.release != null) busRec.duckRelease = opts.release;
+        busRec.duckManual = true;
+        busRec.duckGain.gain.setTargetAtTime(level, this._ctx.currentTime, attack);
+    }
+
+    /**
+     * Release a manual duck: restore the sidechain gain to its resting value
+     * over the release time constant, and clear the manual latch so the
+     * automatic follower (if any) drives this bus again.
+     * @param {string} busName
+     * @param {Object} [opts]
+     * @param {number} [opts.release] - recovery time constant, seconds
+     */
+    stopDuck(busName, opts = {}) {
+        if (this._destroyed) return;
+        const busRec = this._buses.get(busName);
+        if (!busRec) return;
+        const release = opts.release ?? busRec.duckRelease ?? DUCK_RELEASE_TC;
+        busRec.duckManual = false;
+        busRec.duckGain.gain.setTargetAtTime(DUCK_REST, this._ctx.currentTime, release);
+    }
+
+    /**
+     * Register an automatic duck: while `triggerBus` has >= `threshold` voices
+     * sounding, dip `targetBus` to `level`; when it falls below, recover. The
+     * dip uses `attack`, the recovery uses `release` - asymmetric by default,
+     * because a symmetric duck sounds wrong. Evaluated off the hot path by the
+     * shared monitor. An explicit duck()/stopDuck() on the target wins: the
+     * follower never touches a bus whose manual latch is set.
+     * @param {string} triggerBus - bus whose voice count drives the duck
+     * @param {string} targetBus - bus that gets dipped
+     * @param {Object} [opts]
+     * @param {number} [opts.threshold=1] - voices on triggerBus to engage
+     * @param {number} [opts.level=0.3] - ducked multiplier for targetBus
+     * @param {number} [opts.attack] - dip time constant, seconds
+     * @param {number} [opts.release] - recovery time constant, seconds
+     */
+    duckOn(triggerBus, targetBus, opts = {}) {
+        if (this._destroyed) return;
+        const rule = {
+            triggerBus,
+            targetBus,
+            threshold: opts.threshold ?? 1,
+            level: opts.level ?? 0.3,
+            attack: opts.attack ?? DUCK_ATTACK_TC,
+            release: opts.release ?? DUCK_RELEASE_TC,
+            active: false,
+        };
+        this._duckRules.push(rule);
+        this._startMonitor();
+    }
+
+    // ---------- Mix snapshots (v1.2.0) -------------------------------------
+
+    /**
+     * Capture the current mix - every bus's volume and mute - under `name`.
+     * Snapshots are the "menu / gameplay / paused" mixes-as-data primitive.
+     * Bus gains and mutes only: track volumes are NOT captured (a track is a
+     * name-addressed singleton with its own volumeGain, and folding it in would
+     * couple the mix desk to the music layer). Cold path - allocates the record.
+     * @param {string} name
+     */
+    captureSnapshot(name) {
+        if (this._destroyed) return;
+        const names = [];
+        const vols = [];
+        const mutes = [];
+        for (const [busName, busRec] of this._buses) {
+            names.push(busName);
+            vols.push(busRec.volume.peek());
+            mutes.push(busRec.muted.peek());
+        }
+        this._snapshots.set(name, { names, vols, mutes });
+    }
+
+    /**
+     * Apply a captured snapshot, morphing the mix to it over `ms`.
+     *
+     * The morph rides the SIDECHAIN node, not the volume param: the volume/mute
+     * signals are set to their captured targets immediately (so every reactive
+     * readout is instantly truthful), the bus gain is pinned to its target, and
+     * the whole ms-long audible transition is carried by a linear ramp on the
+     * bus's duckGain. Continuity comes from the ACTUAL current product
+     * (busGain x duckGain) read before anything changes, so a snapshot applied
+     * mid-ramp - or mid-duck - picks up from where the sound actually is, with
+     * no click. Applying a snapshot restates the mix, so it clears any manual
+     * duck latch on the buses it touches.
+     *
+     * A bus whose target is silence (muted or zero) is left to the volume/mute
+     * signals' own click-free settle rather than a sidechain fade, so duckGain
+     * is never stranded at zero.
+     * @param {string} name
+     * @param {number} [ms=0] - morph duration; 0 snaps via the signals.
+     */
+    applySnapshot(name, ms = 0) {
+        if (this._destroyed) return;
+        const snap = this._snapshots.get(name);
+        if (!snap) return;
+        const now = this._ctx.currentTime;
+        for (let i = 0; i < snap.names.length; i++) {
+            const busRec = this._buses.get(snap.names[i]);
+            if (!busRec) continue;
+            const tgtVol = snap.vols[i];
+            const tgtMuted = snap.mutes[i];
+            const tgtEff = tgtMuted ? 0 : tgtVol;
+
+            // Actual audible product BEFORE any change - interrupt-safe.
+            const curProduct = busRec.gain.gain.value * busRec.duckGain.gain.value;
+
+            // Signals = truth, applied now.
+            busRec.volume.set(tgtVol);
+            busRec.muted.set(tgtMuted);
+
+            // A snapshot restates the mix: drop any manual duck latch and clear
+            // the sidechain's pending schedule before we (maybe) morph it.
+            busRec.duckManual = false;
+            const dg = busRec.duckGain.gain;
+            dg.cancelScheduledValues(now);
+
+            if (ms > 0 && tgtEff > 0) {
+                // Pin the bus gain to target and carry the ms morph on the
+                // sidechain, starting from whatever keeps the product continuous.
+                busRec.gain.gain.cancelScheduledValues(now);
+                busRec.gain.gain.setValueAtTime(tgtEff, now);
+                dg.setValueAtTime(curProduct / tgtEff, now);
+                dg.linearRampToValueAtTime(DUCK_REST, now + ms / 1000);
+            } else {
+                // Snap: signals settle the bus at RAMP_TC (already click-free);
+                // rest the sidechain.
+                dg.setValueAtTime(DUCK_REST, now);
+            }
+        }
+    }
+
+    // ---------- Dynamic buses + meters (v1.2.0) ----------------------------
+
+    /**
+     * Create a bus after init(). The static set from opts.buses covers most
+     * games, but a bus added at runtime is exactly the path that can walk off
+     * the 2^21 handle ceiling, so the fail-closed check that init() does up
+     * front is repeated here. Idempotent: an existing name returns its record.
+     *
+     * `{ meter: true }` taps an AnalyserNode for level() readouts; without it
+     * no AnalyserNode is allocated. A bus created here gets its pool the first
+     * time a sound is routed to it via defineSounds().
+     * @param {string} name
+     * @param {Object} [opts]
+     * @param {boolean} [opts.meter=false]
+     * @returns {Object} the bus record (opaque; use the named accessors).
+     */
+    createBus(name, opts = {}) {
+        if (this._destroyed) throw new Error('LiteAudio: destroyed');
+        if (!this._initialized) throw new Error('LiteAudio: init() before createBus()');
+        if (name === 'master') throw new Error('LiteAudio: "master" is a reserved bus name');
+        if (this._buses.has(name)) return this._buses.get(name);
+        if (this._busList.length >= MAX_BUSES) {
+            throw new RangeError(
+                'LiteAudio: bus "' + name + '" would exceed the handle ceiling of ' +
+                MAX_BUSES + ' (2^21). A voice handle is busIndex * 2^32 + poolHandle ' +
+                'and stops being an exact integer past bus index 2^21 - 1.'
+            );
+        }
+        return this._buildBus(name, opts);
+    }
+
+    /**
+     * Reactive readable: a metered bus's level (RMS of the time-domain signal,
+     * updated ~10 Hz), or null on an unmetered or unknown bus.
+     * @param {string} busName
+     * @returns {Object|null} ReadSignal<number> or null
+     */
+    level(busName) {
+        return this._buses.get(busName)?.level ?? null;
+    }
+
+    // ---------- Auto-suspend (v1.2.0) --------------------------------------
+
+    /**
+     * Arm auto-suspend: after `after` seconds with no SFX voice and no playing
+     * track, the context is suspended to stop the hardware spinning on silence.
+     * A later play() resumes it (see play()).
+     *
+     * Refused on iOS and returns false: there, a suspend -> resume can demand a
+     * fresh user gesture, which would silently un-unlock a page that was
+     * working. Off by default everywhere. See decisions/0005-auto-suspend.md.
+     * @param {Object} [opts]
+     * @param {number} [opts.after=30] - silent seconds before suspending
+     * @returns {boolean} whether auto-suspend was armed
+     */
+    enableAutoSuspend(opts = {}) {
+        if (this._destroyed) return false;
+        if (this._isIOS()) return false;
+        this._autoSuspend = true;
+        this._autoSuspendAfter = opts.after ?? 30;
+        this._silentSince = -1;
+        this._startMonitor();
+        return true;
+    }
+
+    /** Disarm auto-suspend. Does not resume a context we already suspended - a
+     *  play() or the app does that. */
+    disableAutoSuspend() {
+        this._autoSuspend = false;
+        this._silentSince = -1;
+    }
+
+    /**
+     * True while the context is suspended by OUR auto-suspend (not by the app
+     * or the OS). Lets a HUD show a "dormant" state distinct from a manual pause.
+     */
+    isAutoSuspended() {
+        return this._selfSuspended;
+    }
+
+    /** iOS/iPadOS detection for the auto-suspend guard. iPadOS 13+ reports as
+     *  Macintosh, so the touch-point count disambiguates a real Mac. */
+    _isIOS() {
+        const nav = this._window && this._window.navigator;
+        if (!nav) return false;
+        const ua = nav.userAgent || '';
+        if (/iP(hone|ad|od)/.test(ua)) return true;
+        if (/Macintosh/.test(ua) && (nav.maxTouchPoints || 0) > 1) return true;
+        return false;
+    }
+
     // ---------- Signal getters ---------------------------------------------
 
     /** Reactive readable: current context state ('suspended'|'running'|...). */
@@ -1132,6 +1491,148 @@ export class LiteAudio {
 
     /** Direct access to the master GainNode (advanced). */
     masterNode() { return this._master; }
+
+    // ---------- Shared monitor (meters / duck follower / auto-suspend) -----
+
+    /**
+     * Start the shared monitor if it is not already running. Idempotent: every
+     * consumer (a duckOn rule, a metered bus, enableAutoSuspend) calls it, and
+     * only the first one arms the timer. The tick closure is built once and
+     * reschedules itself by reference so no closure is allocated per tick.
+     */
+    _startMonitor() {
+        if (this._monitorTimer != null) return;
+        if (!this._monitorTick) {
+            this._monitorTick = () => {
+                this._monitorTimer = null;
+                if (this._destroyed) return;
+                this._evalDuckRules();
+                this._sweepMeters();
+                this._evalAutoSuspend();
+                this._monitorTimer = this._setTimeout(this._monitorTick, MONITOR_INTERVAL_MS);
+            };
+        }
+        this._monitorTimer = this._setTimeout(this._monitorTick, MONITOR_INTERVAL_MS);
+    }
+
+    /**
+     * Evaluate automatic-duck rules. Writes to a target bus only on an EDGE
+     * (the trigger crossing its threshold), so steady state is free and a
+     * held-down trigger does not re-schedule a ramp every tick. A bus under an
+     * explicit duck() (manual latch set) is skipped - manual always wins.
+     * Allocation-free: indexed loops, Map.get, pool.activeCount() (documented
+     * zero-alloc), and at most one setTargetAtTime on an edge.
+     */
+    _evalDuckRules() {
+        const rules = this._duckRules;
+        for (let i = 0; i < rules.length; i++) {
+            const rule = rules[i];
+            const target = this._buses.get(rule.targetBus);
+            if (!target || target.duckManual) continue;
+            const trig = this._buses.get(rule.triggerBus);
+            const voices = trig && trig.pool ? trig.pool.activeCount() : 0;
+            const shouldDuck = voices >= rule.threshold;
+            if (shouldDuck === rule.active) continue;   // no edge, no write
+            rule.active = shouldDuck;
+            const now = this._ctx.currentTime;
+            if (shouldDuck) {
+                target.duckGain.gain.setTargetAtTime(rule.level, now, rule.attack);
+            } else {
+                target.duckGain.gain.setTargetAtTime(DUCK_REST, now, rule.release);
+            }
+        }
+    }
+
+    /**
+     * Read every metered bus's analyser into its pre-allocated buffer and write
+     * the RMS to the bus's level() signal. Allocation-free per read: the buffer
+     * is created once in _attachMeter, getFloatTimeDomainData writes in place,
+     * and the RMS math uses locals only. Runs at the monitor's ~10 Hz.
+     */
+    _sweepMeters() {
+        const metered = this._meteredBuses;
+        for (let i = 0; i < metered.length; i++) {
+            const busRec = metered[i];
+            const buf = busRec.meterBuffer;
+            busRec.analyser.getFloatTimeDomainData(buf);
+            let sumSq = 0;
+            for (let j = 0; j < buf.length; j++) { const s = buf[j]; sumSq += s * s; }
+            busRec.level.set(Math.sqrt(sumSq / buf.length));
+        }
+    }
+
+    /**
+     * Auto-suspend: when every bus has been silent (no SFX voices, no playing
+     * track) for _autoSuspendAfter seconds, suspend the context to stop the
+     * audio hardware spinning on silence. A later play() wakes it (see play()).
+     * Off unless enableAutoSuspend() armed it, and it never engages on a context
+     * we did not observe reach 'running' via unlock. Allocation-free.
+     */
+    _evalAutoSuspend() {
+        if (!this._autoSuspend || this._selfSuspended) return;
+        const ctx = this._ctx;
+        if (!ctx || ctx.state !== 'running' || !this._sUnlocked.peek()) {
+            this._silentSince = -1;
+            return;
+        }
+        const silent = this.activeCount() === 0 && !this._anyTrackPlaying();
+        if (!silent) { this._silentSince = -1; return; }
+        const now = ctx.currentTime;
+        if (this._silentSince < 0) { this._silentSince = now; return; }
+        if (now - this._silentSince >= this._autoSuspendAfter) {
+            this._silentSince = -1;
+            this._selfSuspended = true;
+            if (typeof ctx.suspend === 'function') {
+                const p = ctx.suspend();
+                if (p && typeof p.catch === 'function') p.catch(() => {});
+            }
+        }
+    }
+
+    /** Zero-alloc scan for any playing track (indexed, no Map iterator). */
+    _anyTrackPlaying() {
+        const list = this._trackList;
+        for (let i = 0; i < list.length; i++) {
+            if (list[i].playing.peek()) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Wake a context WE auto-suspended, from the play() hot path. Deliberately
+     * NOT the full D3 unlock ceremony: the context is already unlocked, so the
+     * silent-buffer pulse is unnecessary (and allocates), and auto-suspend is
+     * hard-off on iOS so a plain resume() is all any live platform needs. We do
+     * not await it - a source scheduled now onto a frozen-clock context is
+     * pinned by the spec to the resume boundary and plays from its head, so the
+     * native scheduler holds the triggering voice for us. No microtask, no
+     * allocation. See decisions/0005-auto-suspend.md.
+     */
+    _wakeFromAutoSuspend() {
+        this._selfSuspended = false;
+        const ctx = this._ctx;
+        if (!ctx || typeof ctx.resume !== 'function') return;
+        const p = ctx.resume();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+
+    /**
+     * Attach an AnalyserNode to a bus for level() metering. Taps duckGain (post
+     * volume, mute AND duck) so the meter reads what actually reaches master.
+     * The analyser is a pure observer - it is not connected onward. The read
+     * buffer is allocated ONCE here, never per read.
+     */
+    _attachMeter(busRec) {
+        if (busRec.analyser) return;
+        if (typeof this._ctx.createAnalyser !== 'function') return;
+        const analyser = this._ctx.createAnalyser();
+        busRec.duckGain.connect(analyser);
+        busRec.analyser = analyser;
+        busRec.meterBuffer = new Float32Array(analyser.fftSize);
+        busRec.level = signal(0);
+        this._meteredBuses.push(busRec);
+        this._startMonitor();
+    }
 
     // ---------- Unlock queue -----------------------------------------------
 
@@ -1181,6 +1682,12 @@ export class LiteAudio {
         this._unlockAbort?.abort();
         this._lifecycleAbort?.abort();
 
+        // Stop the shared monitor so no tick fires into a torn-down engine.
+        if (this._monitorTimer != null) {
+            this._clearTimeout(this._monitorTimer);
+            this._monitorTimer = null;
+        }
+
         if (this._statechangeHandler && this._ctx?.removeEventListener) {
             this._ctx.removeEventListener('statechange', this._statechangeHandler);
         }
@@ -1219,9 +1726,11 @@ export class LiteAudio {
         }
         this._effectHandles.length = 0;
 
-        // Disconnect bus and master gains.
+        // Disconnect bus, sidechain, analyser and master gains.
         for (const [, busRec] of this._buses) {
             try { busRec.gain.disconnect(); } catch {}
+            try { busRec.duckGain?.disconnect(); } catch {}
+            try { busRec.analyser?.disconnect(); } catch {}
         }
         try { this._master?.disconnect(); } catch {}
 
@@ -1231,7 +1740,12 @@ export class LiteAudio {
         this._soundsByBus.clear();
         this._pendingPlays.clear();
         this._tracks.clear();
+        this._trackList.length = 0;
         this._lastPlayed.clear();
+        this._duckRules.length = 0;
+        this._snapshots.clear();
+        this._meteredBuses.length = 0;
+        this._monitorTick = null;
         this._master = null;
         this._ctx = null;
     }

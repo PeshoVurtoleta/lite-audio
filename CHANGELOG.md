@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.2.0
+
+Mix intelligence: ducking, snapshots, auto-suspend, per-bus meters — none of
+which Howler has an answer for.
+
+`stop()` stays byte-identical to 1.0.0. `play()` and the per-bus write effect
+were re-baselined deliberately (`test/HashParity.test.js` header explains each),
+and the extended zero-GC gate proves the one new repeated path — the shared
+monitor tick — holds zero retained allocation with all four features live.
+
+### The design in one line
+
+All four features avoid fighting the volume/mute effect for the bus's gain param.
+Ducking and snapshot morphs live on a per-bus **sidechain** gain spliced under
+volume/mute (`gain → duckGain → master`), so automations compose instead of
+clobbering each other; meters, the duck follower and auto-suspend share one cold
+~10 Hz monitor that never touches `play()`/`stop()`. See `decisions/0003`–`0006`.
+
+### Added
+
+- **Ducking.** `duck(bus, level, {attack, release})` / `stopDuck(bus, {release})`
+  is the manual, always-wins primitive; `duckOn(triggerBus, targetBus, {...})` is
+  an opt-in voice-count follower evaluated off the hot path, edge-only. Attack and
+  release are separate time constants — a symmetric duck sounds wrong. An explicit
+  `duck()` latches the bus out of the follower until `stopDuck()`. See
+  `decisions/0003-ducking.md`.
+- **Mix snapshots.** `captureSnapshot(name)` records every bus's volume + mute;
+  `applySnapshot(name, ms)` morphs back over `ms`. The signals become truthful
+  immediately while the audible transition rides the sidechain, continuous from
+  the *actual* current level — so an apply mid-morph, or mid-duck, is click-free.
+  Bus gains and mutes only, not track volumes. See `decisions/0004-snapshots.md`.
+- **Auto-suspend.** `enableAutoSuspend({after})` suspends the context after N
+  silent seconds; a later `play()` wakes it. The wake is one monomorphic branch on
+  `play()` that fires a bare `resume()` and lets the native scheduler hold the
+  triggering voice against the frozen clock — no await, no microtask, no
+  allocation. Off by default and **refused on iOS**, where a suspend→resume can
+  demand a fresh gesture and silently un-unlock the page. See
+  `decisions/0005-auto-suspend.md`.
+- **Per-bus meters.** `createBus(name, { meter: true })` taps an `AnalyserNode`
+  post-duck; `level(bus)` is a ~10 Hz RMS signal. The read sweeps one
+  pre-allocated `Float32Array` per metered bus — zero allocation per read, proven
+  by the gate. Unmetered buses allocate no analyser.
+- **Dynamic buses.** `createBus(name, opts)` creates a bus after `init()`. The
+  2^21 handle ceiling (1.1.1) is now re-checked at runtime, so a bus created past
+  it fails closed with a `RangeError` instead of issuing colliding handles. See
+  `decisions/0006-dynamic-bus.md`.
+- **`test/MixIntelligence.test.js`** — 21 tests: the duck curve asserted on the
+  mock clock (attack ≠ release, edge-only, explicit-wins), snapshot round-trip and
+  sidechain-morph continuity, meter RMS and buffer reuse, the auto-suspend cycle
+  including the play()-wake and the iOS refusal, and the runtime bus ceiling.
+
+### Changed
+
+- **`play()` golden re-baselined** for the auto-suspend wake check (zero-alloc,
+  proven by the gate). **Per-bus write effect golden re-baselined** because the
+  effect was relocated verbatim into a shared `_buildBus()` for `createBus()` —
+  byte-identical logic, moved lexical home. `stop()` unchanged.
+- **`test/torture.mjs` extended**: a second phase builds a live engine with all
+  four features active and measures the monitor tick — 0 bytes/op, still
+  falsifiable via `LITEAUDIO_TORTURE_LEAK=1`.
+- **Mock harness** gained `createAnalyser` (`test/mock-ctx.js`) for the meter path.
+
 ## 1.1.1
 
 The handle contract, written down, and a zero-GC gate that can see it.

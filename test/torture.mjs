@@ -1,5 +1,5 @@
 /**
- * @zakkster/lite-audio -- torture gate (AU0 / v1.1.1).
+ * @zakkster/lite-audio -- torture gate (AU0 / v1.1.1, extended AU1 / v1.2.0).
  *
  * DONE-WHEN, one command:
  *
@@ -49,12 +49,28 @@
  * routes the gated path through the allocating (object-handle) variant; the gate
  * then rejects and exits non-zero. That is the control -- see CHANGELOG.md.
  *
+ * AU1 EXTENSION -- the monitor tick, all four mix features live
+ *
+ * v1.2.0 adds ducking, snapshots, meters and auto-suspend. Three of those run
+ * off a shared ~10 Hz monitor tick (the duck follower, the meter sweep, the
+ * auto-suspend silence check); the fourth, auto-suspend's wake, is one boolean
+ * branch on play(). The monitor tick is the one NEW repeated path, and unlike
+ * play() it allocates no mock node -- it only reads activeCount(), sweeps a
+ * pre-allocated analyser buffer, and edge-writes -- so it can be measured
+ * HONESTLY against a real engine here, not a synthetic stand-in. This gate
+ * therefore builds a live LiteAudio with all four features active (a saturated
+ * duck follower, a metered bus, auto-suspend armed, voices sounding) and proves
+ * the steady-state tick holds zero retained allocation. That is the AU1
+ * assertion "the extended gate stays green with all four features active."
+ *
  * Peers are devDependencies, never runtime deps: Audio.js has zero deps.
  *
  * @license MIT
  */
 
 import { measureOps, checkNoGc } from '@zakkster/lite-gc-profiler';
+import { LiteAudio } from '../Audio.js';
+import { createMockContext, mockFetch, mockDocument, flushMicrotasks } from './mock-ctx.js';
 
 // --- config ------------------------------------------------------------------
 
@@ -74,6 +90,20 @@ const HANDLE_MAX_BYTES_PER_OP = 4.0;
 // The control (retained object handle) must land clearly above the handle paths,
 // or the harness is not measuring allocation and this gate is theater.
 const CONTROL_MIN_BYTES_PER_OP = 8.0;
+
+// Monitor-tick phase (AU1). Fewer ops than the handle phase because each tick
+// sweeps a full 2048-wide analyser buffer (the real cost at real 10 Hz); half a
+// million ticks is ~14 hours of real monitor time and plenty of signal. The
+// steady-state tick retains nothing, so its ceiling matches the handle path.
+const MON_OPS = 500_000;
+// The combined tick is a fresh, larger call site than the handle arithmetic, so
+// it needs more warmup to fully tier before measurement (under-warmed, the
+// optimizer's own transient allocation reads as ~16 bytes/op that vanishes once
+// steady - measured: every method is ~0 alone and the second combined pass is
+// literally 0.0000). stabilize:true GC-baselines so warmup allocation is not
+// counted against steady state.
+const MON_WARMUP = 200_000;
+const MON_MAX_BYTES_PER_OP = 4.0;
 
 const LEAK = process.env.LITEAUDIO_TORTURE_LEAK === '1';
 
@@ -133,9 +163,63 @@ function fmt(row) {
         '  maxMs=' + row.maxMs.toFixed(3);
 }
 
+// --- live-engine monitor phase (AU1) -----------------------------------------
+
+/**
+ * Build a real LiteAudio (mock context) with ALL FOUR mix features live and
+ * return a function that runs exactly one monitor tick's work -- the duck
+ * follower, the meter sweep, the auto-suspend check -- with no scheduling. The
+ * measured tick is the steady state: the follower is already engaged (edge
+ * done), voices are sounding (so auto-suspend stays in its not-silent path),
+ * and the meter reads a constant into its pre-allocated buffer. Nothing here
+ * allocates a mock node, so the figure is the engine's own per-tick cost.
+ */
+async function buildMonitorTick() {
+    const ctx = createMockContext({ state: 'suspended' });
+    const gestures = [];
+    const win = {
+        navigator: { userAgent: 'node-torture-gate', maxTouchPoints: 0 },
+        addEventListener: (_evt, cb) => gestures.push(cb),
+        removeEventListener: () => {},
+    };
+    const audio = new LiteAudio({
+        buses: ['sfx', 'music', 'voice'],
+        poolCapacity: 8,
+        window: win,
+        document: mockDocument(),
+        fetch: mockFetch({ '/s.wav': 500 }),
+        // No-op timers: the monitor auto-starts but we drive its tick by hand,
+        // so nothing real is scheduled and nothing leaks past the measurement.
+        setTimeout: () => 0,
+        clearTimeout: () => {},
+    });
+    await audio.init(ctx);
+    await audio.defineSounds({ laser: { src: ['/s.wav'], bus: 'sfx' } });
+    for (const cb of gestures) cb({});        // unlock
+    await flushMicrotasks(8);
+
+    // All four features live.
+    audio.duckOn('sfx', 'music', { threshold: 1, level: 0.3 });
+    audio.createBus('meter', { meter: true });
+    audio._buses.get('meter').analyser._fill = 0.25;   // a constant, nonzero RMS
+    audio.enableAutoSuspend({ after: 1e9 });           // armed; voices keep it awake
+
+    audio.play('laser');
+    audio.play('laser');                               // saturate the follower's trigger
+    audio._evalDuckRules();                            // consume the rising edge now
+
+    if (audio.activeCount('sfx') < 1) die('monitor setup: no active voices to duck on');
+
+    return () => {
+        audio._evalDuckRules();
+        audio._sweepMeters();
+        audio._evalAutoSuspend();
+    };
+}
+
 // --- gate --------------------------------------------------------------------
 
-function main() {
+async function main() {
     if (typeof globalThis.gc !== 'function') {
         die('run with --expose-gc:  node --expose-gc test/torture.mjs');
     }
@@ -196,9 +280,35 @@ function main() {
         }
     }
 
+    // 4) AU1: the shared monitor tick, with the duck follower engaged, a bus
+    //    metered and auto-suspend armed, must hold zero retained allocation --
+    //    measured against a REAL engine, since the tick allocates no mock node.
+    const tickFn = await buildMonitorTick();
+    const mon = (() => {
+        const r = measureOps(tickFn, { ops: MON_OPS, warmup: MON_WARMUP, source: 'gc', stabilize: true });
+        const report = checkNoGc(r.summary, RULES);
+        return {
+            label: 'monitor-tick', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
+        };
+    })();
+
+    process.stderr.write('monitor tick (duck follower + meter sweep + auto-suspend check, all live):\n');
+    process.stderr.write(fmt(mon) + '\n');
+
+    if (!mon.noMajor) {
+        die('monitor-tick: ' + mon.major + ' major GC / maxMs ' + mon.maxMs.toFixed(3) +
+            ' violates ' + JSON.stringify(RULES));
+    }
+    if (!(mon.bytesPerOp <= MON_MAX_BYTES_PER_OP)) {
+        die('monitor-tick measured ' + mon.bytesPerOp.toFixed(4) + ' bytes/op, over the ' +
+            MON_MAX_BYTES_PER_OP + ' ceiling -- a mix feature is allocating on the monitor path.');
+    }
+
     process.stderr.write(
         'result: boxed-double handle (bus>=1, gen>8388608) is below the gate resolution; ' +
-        'plain-number handle keeps its zero-retain property. Tradeoff closed (decisions/0001).\n');
+        'plain-number handle keeps its zero-retain property (decisions/0001). The v1.2.0 ' +
+        'monitor tick holds zero retained allocation with all four mix features live.\n');
     process.stdout.write('ok\n');
     process.exit(0);
 }

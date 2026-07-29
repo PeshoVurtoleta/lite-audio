@@ -1,16 +1,24 @@
 /**
- * @zakkster/lite-audio - hot-path parity (AU0 / v1.1.1).
+ * @zakkster/lite-audio - hot-path parity.
  *
- * v1.1.1 is a docs-and-tests release: it adds a handle contract, a branded type,
- * a decision record and a zero-GC gate, plus one cold fail-closed guard in init().
- * It changes NO hot path. This test proves that mechanically - it extracts the
- * source text of play(), stop() and the per-bus write effect straight out of
- * Audio.js and hashes each. If a future edit touches one of these three bodies,
- * the SHA moves and this test fails loudly, forcing the edit to be a deliberate,
- * reviewed change to a hot path rather than an accident under a "docs" banner.
+ * This test extracts the source text of play(), stop() and the per-bus write
+ * effect straight out of Audio.js and hashes each. If a future edit touches one
+ * of these bodies, the SHA moves and this test fails loudly, forcing the edit
+ * to be a deliberate, reviewed change rather than an accident.
  *
- * Update a golden ONLY when a hot-path change is intended, and say so in the
- * CHANGELOG when you do.
+ * History of the goldens:
+ *   - AU0 / v1.1.1 (docs-and-tests) froze all three from the v1.1.0 source.
+ *   - AU1 / v1.2.0 (mix intelligence) deliberately re-baselined TWO of them:
+ *       * play(): one monomorphic `if (this._selfSuspended)` wake check for
+ *         auto-suspend - zero-alloc, proven by the extended torture gate.
+ *       * per-bus write effect: relocated verbatim into _buildBus() so
+ *         createBus() can share it. The closure body is byte-IDENTICAL logic;
+ *         only its lexical home moved, which is enough to move the SHA.
+ *     stop() stayed frozen across both - the true innermost hot path is
+ *     untouched, and this test still proves it.
+ *
+ * Update a golden ONLY when a change to that body is intended, and say so in
+ * the CHANGELOG when you do.
  */
 
 import { describe, it } from 'node:test';
@@ -40,12 +48,13 @@ function block(anchor) {
 
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 
-// Goldens captured from the v1.1.0 source before any AU0 edit. See file header.
+// See file header for the golden history. stop() is the v1.1.0 original;
+// play() and the bus effect were re-baselined in AU1 / v1.2.0.
 const GOLDENS = [
     {
         name: 'play()',
         anchor: 'play(soundId, volume = 1, pan = 0, pitch = 1)',
-        sha: 'a0f17c4bb6af3519680eb662e092debbcf0ea396ef4bc2905ffa885f4f25b37a',
+        sha: '7acc22ba9fba6e77a20d87c75bccd010f599a581adac96c9723a07778e8596e5',
     },
     {
         name: 'stop()',
@@ -55,7 +64,7 @@ const GOLDENS = [
     {
         name: 'per-bus write effect',
         anchor: 'const busEffect = effect(() =>',
-        sha: '33b5f51fd67cb6f8c41c4071a4d756654b86cbdd4e3de962b78cb1bc786d7dbb',
+        sha: '8014426e778ee42020c390de347a6a96e865a9767242d4192cc2d73aaaaacdfc',
     },
 ];
 

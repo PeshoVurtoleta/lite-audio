@@ -24,11 +24,11 @@ that eventually deprecates the Howler wrapper it replaces.
 - Ports the iOS/mobile unlock semantics of `lite-audio-manager` verbatim, plus a
   bounded pre-unlock play queue the manager could not offer from Howler's outside
 
-**Status:** v1.0.0 covers SFX. The music streaming layer
-(`MediaElementAudioSourceNode`, crossfades, exclusive/unique) is the v1.1.0
-milestone; ducking, snapshots, and auto-suspend are v1.2.0; a Howler-shim
-compat subpath and full parity certification against `lite-audio-manager` are
-v2.0.0.
+**Status:** v1.0.0 covers SFX; v1.1.0 added the music streaming layer
+(`MediaElementAudioSourceNode`, crossfades, exclusive/unique); **v1.2.0 adds mix
+intelligence** — ducking, snapshots, auto-suspend, per-bus meters, dynamic buses.
+A Howler-shim compat subpath and full parity certification against
+`lite-audio-manager` are v2.0.0.
 
 ## Install
 
@@ -208,6 +208,78 @@ native loop is switched off (it would jump to `0`, not to `loopStart`). Note tha
 to ~250 ms. For a tight musical loop, prefer an asset whose file boundaries *are* the
 loop.
 
+## Mix intelligence (v1.2.0)
+
+Four features, one architectural idea: **none of them fight the volume/mute effect
+for the bus gain param.** A second gain node is spliced under every bus —
+
+```
+pool / track -> gain (volume + mute) -> duckGain (sidechain) -> master
+```
+
+— and ducking and snapshot morphs live on `duckGain`, so they *compose* with volume
+and mute (the graph multiplies them) instead of two automations clobbering one
+`AudioParam`. Meters, the duck follower, and auto-suspend share a single cold
+~10 Hz monitor that never touches `play()`/`stop()`. The monitor tick is proven to
+hold zero retained allocation with all four features live (`npm run gate`).
+
+### Ducking
+
+```js
+audio.duck('music', 0.3, { attack: 0.05, release: 0.4 });  // dip to 30%
+audio.stopDuck('music');                                    // recover
+
+// or automatic: while >= 2 SFX voices sound, dip music
+audio.duckOn('sfx', 'music', { threshold: 2, level: 0.3 });
+```
+
+`setTargetAtTime` is the engine's bus-write primitive and is exactly right here —
+an exponential approach with a time constant *is* a compressor release. Attack and
+release are **separate** because a symmetric duck sounds wrong: music should get out
+of the way fast and return slowly. An explicit `duck()` always wins over the
+follower (it latches the bus until `stopDuck()`). See `decisions/0003-ducking.md`.
+
+### Mix snapshots
+
+```js
+audio.captureSnapshot('gameplay');
+// ... later, on pause ...
+audio.applySnapshot('paused', 400);   // morph over 400 ms
+```
+
+Capture records every bus's volume and mute (not track volumes — a snapshot is the
+*desk*). Apply sets the signals to the target immediately, so every readout is
+instantly truthful, and carries the `ms`-long audible transition on the sidechain,
+continuous from the **actual current level** — so a snapshot applied mid-morph, or
+mid-duck, is click-free. See `decisions/0004-snapshots.md`.
+
+### Per-bus meters + dynamic buses
+
+```js
+audio.createBus('ambient', { meter: true });
+const level = audio.level('ambient');   // ReadSignal<number>, RMS at ~10 Hz
+```
+
+`createBus()` adds a bus after `init()` (idempotent, rejects `'master'`). The 2^21
+handle ceiling is re-checked at runtime, so a bus created past it fails closed with
+a `RangeError` rather than issuing colliding handles. `{ meter: true }` taps an
+`AnalyserNode` post-duck and reads RMS into **one** pre-allocated `Float32Array` per
+bus — zero allocation per read. An unmetered bus allocates no analyser and
+`level()` returns `null`. See `decisions/0006-dynamic-bus.md`.
+
+### Auto-suspend
+
+```js
+if (audio.enableAutoSuspend({ after: 20 })) { /* armed (false on iOS) */ }
+```
+
+After N silent seconds the context is suspended to stop the hardware spinning; the
+next `play()` wakes it. The wake is one monomorphic branch that fires a bare
+`resume()` and lets the native scheduler hold the triggering voice against the
+frozen clock — no await, no microtask, no allocation. **Off by default, and refused
+on iOS**, where a suspend→resume can demand a fresh gesture and silently un-unlock a
+working page. See `decisions/0005-auto-suspend.md`.
+
 ## Signal readouts (the whole reactive surface)
 
 | Signal | Read via | Notes |
@@ -259,15 +331,24 @@ notes for that.
 npm test
 ```
 
-87 tests across 25 suites. The unlock state machine (including `'interrupted'`),
+108 tests across 31 suites. The unlock state machine (including `'interrupted'`),
 loader fallback + error, bus writes as `setTargetAtTime`, pool delegation (steal,
 generation no-op on stale handles, bus scope), unlock queue semantics
 (latest-per-sound, bounded), destroy idempotency — plus the whole music layer
-(`test/Tracks.test.js`), the bus-handle namespace (`test/BusHandles.test.js`), and
-the handle contract (`test/Handles.test.js`): every encoding pinned by name,
-including `stop(0)` reaching the real bus-0 voice, `stop(-2)` staying inert, the
-real engine leaving SMI range past generation 8,388,608, and the `2^21` bus
-ceiling failing closed.
+(`test/Tracks.test.js`), the bus-handle namespace (`test/BusHandles.test.js`), the
+handle contract (`test/Handles.test.js`): every encoding pinned by name, including
+`stop(0)` reaching the real bus-0 voice, `stop(-2)` staying inert, the real engine
+leaving SMI range past generation 8,388,608, and the `2^21` bus ceiling failing
+closed — and the mix-intelligence suite (`test/MixIntelligence.test.js`): the duck
+curve on the mock clock (attack ≠ release, edge-only, explicit-wins), snapshot
+round-trip and sidechain-morph continuity, meter RMS and buffer reuse, the
+auto-suspend cycle with its play()-wake and iOS refusal, and the runtime bus
+ceiling.
+
+Hot paths are locked by `test/HashParity.test.js`, which hashes the source of
+`play()`, `stop()`, and the per-bus write effect against goldens: `stop()` is
+byte-identical back to 1.0.0, and any change to the other two must be a deliberate,
+CHANGELOG-noted re-baseline rather than an accident.
 
 ### Zero-GC gate
 
@@ -277,16 +358,16 @@ node --expose-gc test/torture.mjs
 
 Measures the handle return on bus `≥ 1` and past generation `8,388,608` — the
 cases where it leaves SMI range and where the old bus-0/low-gen gate was blind —
-reports `bytesPerOp` per regime, and is **falsifiable**:
+reports `bytesPerOp` per regime, and (v1.2.0) adds a second phase that builds a
+**live engine with all four mix features active** and measures the shared monitor
+tick — 0 bytes/op retained. It is **falsifiable**:
 
 ```bash
 LITEAUDIO_TORTURE_LEAK=1 node --expose-gc test/torture.mjs   # exits non-zero
 ```
 
 routes the gated path through the rejected `{bus,handle}`-object design so a pass
-means the gate can actually see allocation. `test/HashParity.test.js` locks
-`play()`, `stop()`, and the per-bus write effect byte-for-byte, so a "docs" release
-cannot quietly touch a hot path.
+means the gate can actually see allocation.
 
 The mock harness (`test/mock-ctx.js`) records every `AudioParam` scheduled event
 into an inspectable `.events` array **and settles `.value` on whatever the

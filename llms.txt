@@ -20,7 +20,8 @@ import { LiteAudio } from '@zakkster/lite-audio';
 - Positional hot path for SFX: play(soundId, volume, pan, pitch) - no options object per call
 - SFX handles are bus-tagged: busIndex * 2^32 + poolHandle. Raw pool handles collide across buses (every pool starts at channel 0 / generation 0), so the tag is what makes stop() name one voice
 - Music tracks are singletons addressed by name, not handle - stopTrack('menu_bg') not stop(handle)
-- v1.1.0 ships SFX + music (crossfade, exclusive, unique, loop points). Ducking / snapshots / auto-suspend are v1.2.0; Howler-shim compat subpath is v2.0.0.
+- v1.2.0 ships SFX + music + mix intelligence (ducking, snapshots, auto-suspend, per-bus meters, dynamic buses). Howler-shim compat subpath is v2.0.0.
+- Mix automation lives on a per-bus sidechain gain (gain -> duckGain -> master) so ducking and snapshot morphs compose with volume/mute instead of fighting for one AudioParam. Meters / duck follower / auto-suspend share one cold ~10 Hz monitor that never touches play()/stop().
 
 ## Quick Start
 ```js
@@ -100,6 +101,19 @@ trackLoadState(name), trackPlaying(name), trackPosition(name), trackDuration(nam
 
 ### Bus + master
 setBusVolume(name, v), setBusMuted(name, m), setMuted(state): signal setters. Every write schedules setTargetAtTime with a 10 ms time constant.
+
+### Mix intelligence (v1.2.0)
+
+duck(bus, level, {attack, release}): dip a bus's sidechain to `level` (0..1 multiplier under volume/mute) over the attack TC. Manual and always-wins - latches the bus out of any follower until stopDuck().
+stopDuck(bus, {release}): restore to rest over the release TC, clearing the manual latch.
+duckOn(triggerBus, targetBus, {threshold=1, level=0.3, attack, release}): automatic follower - while triggerBus has >= threshold voices, dip targetBus. Off the hot path, edge-only. Explicit duck() wins. Attack/release asymmetric by default.
+captureSnapshot(name): record every bus's volume + mute (not track volumes).
+applySnapshot(name, ms): morph to it over ms. Signals truthful immediately; audible transition rides the sidechain, continuous from the actual current level (click-free mid-morph / mid-duck). ms=0 snaps.
+createBus(name, {meter}): create a bus after init(). Idempotent, rejects 'master', fails closed (RangeError) at the 2^21 ceiling at runtime. {meter:true} taps an AnalyserNode.
+level(bus): ReadSignal<number> RMS at ~10 Hz, or null on an unmetered/unknown bus. One pre-allocated Float32Array per metered bus, zero alloc per read.
+enableAutoSuspend({after=30}): suspend the context after N silent seconds; a later play() wakes it (bare resume(), native scheduler holds the voice). Returns false and stays off on iOS (un-unlock hazard). disableAutoSuspend(), isAutoSuspended().
+
+Design records: decisions/0003-ducking, 0004-snapshots, 0005-auto-suspend, 0006-dynamic-bus.
 
 ### Reactive readables
 `ctxState() : ReadSignal<'suspended'|'running'|'interrupted'|'closed'>`

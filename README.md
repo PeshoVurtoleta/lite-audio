@@ -345,7 +345,7 @@ Full migration guide: [`MIGRATION.md`](MIGRATION.md).
 npm test
 ```
 
-152 tests across 43 suites. The unlock state machine (including `'interrupted'`),
+153 tests across 43 suites. The unlock state machine (including `'interrupted'`),
 loader fallback + error, bus writes as `setTargetAtTime`, pool delegation (steal,
 generation no-op on stale handles, bus scope), unlock queue semantics
 (latest-per-sound, bounded), destroy idempotency — plus the whole music layer

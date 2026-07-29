@@ -154,6 +154,27 @@ describe('loader (D4)', () => {
         assert.equal(audio.loadState('boom').peek(), 'error');
     });
 
+    it('binds the default globalThis.fetch so this._fetch(url) is not an illegal invocation', () => {
+        // A browser's native fetch throws "Illegal invocation" when called as a
+        // method (this._fetch(url) sets this = the engine). The default must be
+        // bound to globalThis. Simulate the native receiver guard and prove the
+        // constructor's default survives being invoked as a property.
+        const saved = globalThis.fetch;
+        let seenThis = null;
+        globalThis.fetch = function (url) {
+            if (this !== globalThis) throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+            seenThis = this;
+            return Promise.resolve({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(0) });
+        };
+        try {
+            const audio = new LiteAudio({ buses: ['sfx'] });   // no opts.fetch: exercise the default
+            assert.doesNotThrow(() => audio._fetch('blob:x'), 'default _fetch must be callable as a method');
+            assert.equal(seenThis, globalThis, 'default fetch must run with globalThis as receiver');
+        } finally {
+            globalThis.fetch = saved;
+        }
+    });
+
     it('transitions idle -> loading -> ready observably', async () => {
         const { audio } = await setupAudio({
             fetch: mockFetch({ '/hit.wav': 4410 }),

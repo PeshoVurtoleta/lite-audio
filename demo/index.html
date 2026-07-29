@@ -1,10 +1,10 @@
 <!doctype html>
-<!-- @zakkster/lite-audio - demo. (c) Zahary Shinikchiev. -->
+<!-- @zakkster/lite-audio - SIGNAL // NOISE demo. (c) Zahary Shinikchiev. MIT. -->
 <html lang="en">
 <head>
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
-    <title>lite-audio - reactive engine</title>
+    <title>lite-audio // SIGNAL // NOISE</title>
     <style>
         :root {
             --bg: #070b07;
@@ -23,6 +23,8 @@
             --phosphor: oklch(0.90 0.28 145);
             --amber: #ffb84d;
             --amber: oklch(0.83 0.17 75);
+            --cyan: #7fd4ff;
+            --cyan: oklch(0.85 0.13 220);
             --hot: #ff5252;
             --hot: oklch(0.68 0.24 25);
             --scan: rgba(102, 255, 102, 0.028);
@@ -69,7 +71,7 @@
             margin: 0;
             font-size: 0.9375rem;
             font-weight: 600;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.14em;
             color: var(--phosphor);
             text-shadow: 0 0 0.75rem color-mix(in oklch, var(--phosphor) 45%, transparent);
         }
@@ -83,7 +85,7 @@
         header p {
             margin: 0.25rem 0 0;
             color: var(--dim);
-            max-width: 48rem;
+            max-width: 52rem;
             font-size: 0.75rem;
         }
 
@@ -93,6 +95,7 @@
             letter-spacing: 0.08em;
             text-transform: uppercase;
             white-space: nowrap;
+            text-align: right;
         }
 
         #badge b {
@@ -111,7 +114,7 @@
         }
 
         #tabs button {
-            min-width: 8rem;
+            min-width: 9rem;
         }
 
         .deck {
@@ -190,6 +193,10 @@
             touch-action: none;
         }
 
+        .screen.grab canvas {
+            cursor: crosshair;
+        }
+
         button {
             background: transparent;
             color: var(--ink);
@@ -231,6 +238,12 @@
             outline-offset: 2px;
         }
 
+        a {
+            color: var(--cyan);
+            text-decoration: none;
+            border-bottom: 1px solid color-mix(in oklch, var(--cyan) 40%, transparent);
+        }
+
         .row {
             display: flex;
             gap: 0.375rem;
@@ -248,7 +261,7 @@
 
         .strip {
             display: grid;
-            grid-template-columns: 3.5rem 1fr 3rem 4rem;
+            grid-template-columns: 3.5rem 1fr 3rem 3.75rem;
             gap: 0.5rem;
             align-items: center;
         }
@@ -304,6 +317,26 @@
             background: var(--phosphor);
         }
 
+        .slider {
+            display: grid;
+            grid-template-columns: 5rem 1fr 4rem;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .slider label {
+            color: var(--dim);
+            font-size: 0.625rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+        }
+
+        .slider output {
+            color: var(--phosphor);
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
         dl.readout {
             display: grid;
             grid-template-columns: 1fr auto;
@@ -334,7 +367,7 @@
             color: var(--dim);
         }
 
-        /* ---- SVG state machines ---- */
+        /* ---- SVG state machine ---- */
         .fsm {
             width: 100%;
             height: auto;
@@ -344,6 +377,10 @@
             fill: none;
             stroke: var(--grid);
             stroke-width: 1.25;
+        }
+
+        .fsm .edge.lit {
+            stroke: var(--phosphor);
         }
 
         .fsm .edge-label {
@@ -383,11 +420,21 @@
             fill: var(--hot);
         }
 
+        .fsm .state-node.dormant circle {
+            stroke: var(--amber);
+            fill: color-mix(in oklch, var(--amber) 12%, transparent);
+        }
+
+        .fsm .state-node.dormant text {
+            fill: var(--amber);
+        }
+
         /* ---- tables ---- */
         .tbl {
             display: flex;
             flex-direction: column;
             gap: 0.25rem;
+            overflow-y: auto;
         }
 
         .trow {
@@ -401,25 +448,13 @@
             font-size: 0.75rem;
         }
 
-        .trow[hidden] {
-            display: none;
-        }
-
-        #sounds .trow {
-            grid-template-columns: 5rem 3.5rem 1fr 4.5rem 3rem;
-            cursor: pointer;
-        }
-
-        #sounds .trow.sel {
-            border-color: var(--phosphor);
-        }
-
-        #queue .trow {
-            grid-template-columns: 6rem 1fr;
-        }
-
         #handles .trow {
-            grid-template-columns: 3rem 8.5rem 1fr auto;
+            grid-template-columns: 2.5rem 8.5rem 1fr auto;
+            cursor: default;
+        }
+
+        #handles .trow.stale {
+            opacity: 0.6;
         }
 
         .trow code {
@@ -440,20 +475,16 @@
             text-align: right;
         }
 
-        .st.ready, .st.live {
+        .st.live {
             color: var(--phosphor);
         }
 
-        .st.loading {
-            color: var(--amber);
-        }
-
-        .st.error, .st.stolen {
-            color: var(--hot);
-        }
-
-        .st.idle, .st.ended {
+        .st.ended {
             color: var(--dim);
+        }
+
+        .st.stolen, .st.error {
+            color: var(--hot);
         }
 
         .st.stopped {
@@ -509,8 +540,12 @@
             color: var(--phosphor);
         }
 
-        .lrow.queue .tag {
-            color: var(--amber);
+        .lrow.duck .tag {
+            color: var(--cyan);
+        }
+
+        .lrow.snap .tag {
+            color: var(--cyan);
         }
 
         .lrow.drop .tag {
@@ -521,16 +556,73 @@
             color: var(--amber);
         }
 
-        .lrow.load .tag {
-            color: var(--dim);
+        .lrow.stop .tag {
+            color: var(--amber);
         }
 
         .lrow.bus .tag {
             color: var(--dim);
         }
 
-        .lrow.stop .tag {
-            color: var(--amber);
+        /* ---- migration footer + soak bar ---- */
+        #footer {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem 1.5rem;
+            align-items: flex-start;
+            justify-content: space-between;
+            padding: 0.75rem;
+            border: var(--hair) dashed var(--grid);
+            border-radius: 3px;
+            background: var(--panel);
+        }
+
+        #footer .col {
+            min-width: 0;
+        }
+
+        #footer h2 {
+            margin: 0 0 0.375rem;
+            font-size: 0.6875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.16em;
+            color: var(--dim);
+        }
+
+        pre.diff {
+            margin: 0.375rem 0;
+            padding: 0.5rem 0.625rem;
+            background: var(--panel-in);
+            border: var(--hair) solid var(--grid);
+            border-radius: 2px;
+            font-size: 0.6875rem;
+            overflow-x: auto;
+            white-space: pre;
+        }
+
+        pre.diff .del {
+            color: var(--hot);
+        }
+
+        pre.diff .add {
+            color: var(--phosphor);
+        }
+
+        #soak {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        #soak output {
+            color: var(--phosphor);
+            font-variant-numeric: tabular-nums;
+            font-size: 0.6875rem;
+        }
+
+        #soak output.warn {
+            color: var(--hot);
         }
 
         #gate {
@@ -549,7 +641,7 @@
         }
 
         #gate-inner {
-            max-width: 28rem;
+            max-width: 30rem;
             padding: 1.75rem;
             text-align: center;
             background: var(--panel);
@@ -572,48 +664,32 @@
         }
 
         @media (min-width: 62rem) {
-            #deck-unlock {
+            #deck-voices {
                 grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-                grid-template-areas: "fsm queue" "ctl queue";
+                grid-template-rows: minmax(11rem, 1fr) auto;
+                grid-template-areas: "grid handles" "scope handles";
             }
 
-            #p-fsm-ctx {
-                grid-area: fsm;
+            #p-grid {
+                grid-area: grid;
             }
 
-            #p-unlock-ctl {
-                grid-area: ctl;
+            #p-vscope {
+                grid-area: scope;
             }
 
-            #p-queue {
-                grid-area: queue;
+            #p-handles {
+                grid-area: handles;
             }
 
-            #deck-loader {
-                grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-                grid-template-areas: "sounds fsm" "sounds lctl";
-            }
-
-            #p-sounds {
-                grid-area: sounds;
-            }
-
-            #p-fsm-load {
-                grid-area: fsm;
-            }
-
-            #p-loader-ctl {
-                grid-area: lctl;
-            }
-
-            #deck-mixer {
+            #deck-bus {
                 grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
                 grid-template-rows: minmax(10rem, 1fr) auto;
-                grid-template-areas: "scope strips" "meters strips";
+                grid-template-areas: "duck strips" "meters strips";
             }
 
-            #p-gainscope {
-                grid-area: scope;
+            #p-duck {
+                grid-area: duck;
             }
 
             #p-meters {
@@ -624,46 +700,47 @@
                 grid-area: strips;
             }
 
-            #deck-music {
+            #deck-xfade {
                 grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
                 grid-template-rows: minmax(9rem, 1fr) minmax(8rem, 1fr);
-                grid-template-areas:
-        "xfade  mctl"
-        "tracks mctl";
+                grid-template-areas: "scope xctl" "rings xctl";
             }
 
-            #p-xfade {
-                grid-area: xfade;
+            #p-xscope {
+                grid-area: scope;
             }
 
-            #p-tracks {
-                grid-area: tracks;
+            #p-rings {
+                grid-area: rings;
             }
 
-            #p-music-ctl {
-                grid-area: mctl;
+            #p-xfade-ctl {
+                grid-area: xctl;
             }
 
-            #deck-voices {
+            #deck-unlock {
                 grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-                grid-template-rows: minmax(10rem, 1fr) auto;
-                grid-template-areas: "matrix handles" "twins handles";
+                grid-template-areas: "fsm log" "ctl log";
             }
 
-            #p-matrix {
-                grid-area: matrix;
+            #p-fsm {
+                grid-area: fsm;
             }
 
-            #p-twins {
-                grid-area: twins;
+            #p-unlock-ctl {
+                grid-area: ctl;
             }
 
-            #p-handles {
-                grid-area: handles;
+            #p-ulog {
+                grid-area: log;
             }
 
             .rack {
                 grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+            }
+
+            #footer {
+                flex-wrap: nowrap;
             }
         }
 
@@ -678,286 +755,220 @@
 
 <header>
     <div>
-        <h1>lite-audio <span>/ v1.0.0 / reactive Web Audio engine</span></h1>
-        <p>Signals drive the mixer, one AudioPool sits under each bus, and plays made before the browser unlocks audio
-            are not dropped - they queue and fire on the first gesture. This demo drives the engine's unlock through an
-            injected window, so the part you normally only get one shot at is replayable.</p>
+        <h1>SIGNAL // NOISE <span>/ @zakkster/lite-audio v2.0.0 / four scenes, real traces</span></h1>
+        <p>Every phosphor trace on this page is actual signal - AnalyserNode waveforms and RMS meters read straight off
+            the engine's buses into pre-allocated Float32Arrays. Nothing here is drawn from a formula. The frame loop
+            allocates nothing; the soak bar at the bottom proves it.</p>
     </div>
-    <div id="badge">ctx <b id="b-state">-</b> / unlocked <b id="b-unlocked">no</b> / voices <b id="b-voices">0</b></div>
+    <div id="badge">ctx <b id="b-state">-</b> / unlocked <b id="b-unlocked">no</b> / voices <b id="b-voices">0</b> /
+        heap <b id="b-heap">-</b></div>
 </header>
 
 <nav id="tabs" aria-label="scenes">
-    <button data-scene="0" class="on" aria-pressed="true">1 / unlock</button>
-    <button data-scene="1" aria-pressed="false">2 / loader</button>
-    <button data-scene="2" aria-pressed="false">3 / mixer</button>
-    <button data-scene="3" aria-pressed="false">4 / voices</button>
-    <button data-scene="4" aria-pressed="false">5 / music</button>
+    <button data-scene="0" class="on" aria-pressed="true">1 / voice grid</button>
+    <button data-scene="1" aria-pressed="false">2 / bus desk</button>
+    <button data-scene="2" aria-pressed="false">3 / crossfade deck</button>
+    <button data-scene="3" aria-pressed="false">4 / unlock theater</button>
 </nav>
 
-<!-- ============================ UNLOCK =================================== -->
-<main id="deck-unlock" class="deck">
-    <section id="p-fsm-ctx" class="panel">
-        <div class="panel-title"><span>AudioContext lifecycle / ctxState() signal</span><b
-                id="fsm-ctx-now">suspended</b></div>
-        <svg class="fsm" id="fsm-ctx" viewBox="0 0 520 160" role="img" aria-label="context state machine">
-            <defs>
-                <marker id="ah-ctx" markerWidth="7" markerHeight="7" refX="6" refY="2.5" orient="auto">
-                    <path d="M0,0 L0,5 L6,2.5 z" fill="#3f5f42"/>
-                </marker>
-            </defs>
-            <path class="edge" d="M112,62 L196,62" marker-end="url(#ah-ctx)"/>
-            <text class="edge-label" x="118" y="55">gesture + resume()</text>
-            <path class="edge" d="M196,86 L112,86" marker-end="url(#ah-ctx)"/>
-            <text class="edge-label" x="120" y="100">suspend()</text>
-            <path class="edge" d="M282,60 L378,36" marker-end="url(#ah-ctx)"/>
-            <text class="edge-label" x="288" y="36">phone call (iOS)</text>
-            <path class="edge" d="M382,58 L288,76" marker-end="url(#ah-ctx)"/>
-            <text class="edge-label" x="300" y="92">resume()</text>
-            <path class="edge" d="M282,96 L378,122" marker-end="url(#ah-ctx)"/>
-            <text class="edge-label" x="292" y="128">close()</text>
-            <g class="state-node" data-ctx="suspended">
-                <circle cx="70" cy="74" r="40"/>
-                <text x="70" y="78">suspended</text>
-            </g>
-            <g class="state-node" data-ctx="running">
-                <circle cx="240" cy="74" r="40"/>
-                <text x="240" y="78">running</text>
-            </g>
-            <g class="state-node" data-ctx="interrupted">
-                <circle cx="424" cy="32" r="30"/>
-                <text x="424" y="36">interrupted</text>
-            </g>
-            <g class="state-node" data-ctx="closed">
-                <circle cx="424" cy="128" r="26"/>
-                <text x="424" y="132">closed</text>
-            </g>
-        </svg>
-        <p class="note">The engine listens for <em>touchstart / touchend / mousedown / keydown</em> at capture phase,
-            pulses a silent buffer (iOS needs it), calls <em>resume()</em>, and flushes the queue. Real clicks would
-            unlock it instantly, so this demo hands the engine a <b>fake window</b> via <em>opts.window</em> and fires
-            the gesture itself.</p>
-    </section>
-
-    <section id="p-unlock-ctl" class="panel">
-        <div class="panel-title"><span>dispatch</span><b id="lock-state">locked</b></div>
-        <div class="row">
-            <span class="lbl">play while locked (these queue)</span>
-            <button data-qplay="laser">laser</button>
-            <button data-qplay="click">click</button>
-            <button data-qplay="pad">pad</button>
-            <button id="b-spam">spam laser x5</button>
-            <button id="b-flood">flood 6 distinct</button>
+<!-- ============================ VOICE GRID ============================== -->
+<main id="deck-voices" class="deck">
+    <section id="p-grid" class="panel">
+        <div class="panel-title"><span>voice grid / one AudioPool per bus, capacity x 1</span><b id="vg-active">0
+            voices</b></div>
+        <div class="screen grab">
+            <canvas id="cv-grid"></canvas>
         </div>
-        <div class="row">
-            <span class="lbl">gesture</span>
-            <button id="b-gesture" class="on">dispatch first gesture</button>
-            <button id="b-relock">re-lock and rebuild</button>
-        </div>
-        <p class="note">Latest-per-sound: spamming one sound overwrites its queued intent instead of stacking five
-            voices. Bounded: <em>queueLimit</em> is <b>4</b> here, so a sixth distinct sound is dropped rather than
-            becoming a burst on unlock.</p>
+        <p class="note">Press and strafe across the grid to fire pooled voices - <em>pointer</em> events, so it works
+            with mouse, trackpad or touch. Each cell is one channel: it lights while the voice sounds, and its
+            <b>generation counter</b> ticks up every time that channel is re-issued. Overrun a bus and the oldest voice
+            is <b>stolen</b> - the flash is the steal.</p>
     </section>
 
-    <section id="p-queue" class="panel">
-        <div class="panel-title"><span>pending plays</span><b id="q-size">0 / 4</b></div>
-        <div class="tbl" id="queue"></div>
-        <div class="empty" id="q-empty">queue empty</div>
-        <dl class="readout">
-            <dt>played straight through</dt>
-            <dd id="c-played">0</dd>
-            <dt>queued</dt>
-            <dd id="c-queued">0</dd>
-            <dt>collapsed onto a queued sound</dt>
-            <dd id="c-collapsed">0</dd>
-            <dt>dropped (over limit)</dt>
-            <dd id="c-dropped">0</dd>
-        </dl>
-        <p class="note">Read from <em>engine._pendingPlays</em> - demo-only introspection. The engine has no public
-            readable for queue depth, which is arguably a gap: a loading screen would want it.</p>
-    </section>
-</main>
-
-<!-- ============================ LOADER =================================== -->
-<main id="deck-loader" class="deck" hidden>
-    <section id="p-sounds" class="panel">
-        <div class="panel-title"><span>sounds / loadState() signal per sound</span><b>click a row</b></div>
-        <div class="tbl" id="sounds"></div>
-        <p class="note">Assets are synthesized in an <em>OfflineAudioContext</em>, encoded to WAV, and handed to the
-            engine as blob: URLs - so the demo is one file with no asset folder, and still exercises the real fetch +
-            decode path. <b>thunder</b> is served through an injected <em>fetch</em> with 2.6s of artificial latency;
-            <b>broken</b> is answered with a 404 by that same injected fetch, which walks the loader's real error path
-            without a real request failing in your console.</p>
-    </section>
-
-    <section id="p-fsm-load" class="panel">
-        <div class="panel-title"><span>load lifecycle</span><b id="fsm-load-now">-</b></div>
-        <svg class="fsm" id="fsm-load" viewBox="0 0 420 130" role="img" aria-label="load state machine">
-            <defs>
-                <marker id="ah-load" markerWidth="7" markerHeight="7" refX="6" refY="2.5" orient="auto">
-                    <path d="M0,0 L0,5 L6,2.5 z" fill="#3f5f42"/>
-                </marker>
-            </defs>
-            <path class="edge" d="M92,65 L146,65" marker-end="url(#ah-load)"/>
-            <text class="edge-label" x="94" y="58">defineSounds()</text>
-            <path class="edge" d="M232,52 L288,32" marker-end="url(#ah-load)"/>
-            <text class="edge-label" x="236" y="30">decoded</text>
-            <path class="edge" d="M232,80 L288,100" marker-end="url(#ah-load)"/>
-            <text class="edge-label" x="236" y="112">fetch / decode threw</text>
-            <g class="state-node" data-load="idle">
-                <circle cx="58" cy="65" r="32"/>
-                <text x="58" y="69">idle</text>
-            </g>
-            <g class="state-node" data-load="loading">
-                <circle cx="190" cy="65" r="38"/>
-                <text x="190" y="69">loading</text>
-            </g>
-            <g class="state-node" data-load="ready">
-                <circle cx="330" cy="28" r="28"/>
-                <text x="330" y="32">ready</text>
-            </g>
-            <g class="state-node" data-load="error">
-                <circle cx="330" cy="102" r="28"/>
-                <text x="330" y="106">error</text>
-            </g>
-        </svg>
-    </section>
-
-    <section id="p-loader-ctl" class="panel">
-        <div class="panel-title"><span>loader</span></div>
-        <div class="row">
-            <button id="b-reload">reload all sounds</button>
-            <button id="b-play-selected">play selected</button>
-            <button id="b-race">play thunder while it loads</button>
-        </div>
-        <p class="note">A play aimed at a sound that has not landed yet returns <b>-1</b> and joins the same queue: <em>defineSounds()</em>
-            flushes it the moment the buffer decodes. Press <em>reload</em>, then <em>play thunder</em> immediately - it
-            fires 2.6s later, on its own.</p>
-    </section>
-</main>
-
-<!-- ============================ MIXER ==================================== -->
-<main id="deck-mixer" class="deck" hidden>
-    <section id="p-gainscope" class="panel">
-        <div class="panel-title"><span>gain scope / actual GainNode.value vs signal target</span><b>10ms time
-            constant</b></div>
+    <section id="p-vscope" class="panel">
+        <div class="panel-title"><span>sfx bus waveform / AnalyserNode.getFloatTimeDomainData</span><b
+                id="vg-rate">0 v/s</b></div>
         <div class="screen">
-            <canvas id="cv-gain"></canvas>
+            <canvas id="cv-vscope"></canvas>
         </div>
+    </section>
+
+    <section id="p-handles" class="panel">
+        <div class="panel-title"><span>handles issued</span><b>newest first</b></div>
+        <div class="tbl" id="handles"></div>
+        <div class="empty" id="h-empty">strafe the grid to issue handles</div>
+        <p class="note">A voice handle is <em>busIndex * 2^32 + poolHandle</em>, and the pool handle is
+            <em>[gen:24][channel:8]</em>. The first play on <b>every</b> bus is raw <b>0x00000000</b> - the bus tag above
+            32 bits is the only thing that keeps <em>stop()</em> from crossing wires. Click <b>stop</b> on a
+            <b class="">stale</b> row: the generation no longer matches, so <em>stop()</em> is a silent no-op. That guard
+            is the most interesting thing in the package, and it is usually invisible.</p>
+    </section>
+</main>
+
+<!-- ============================ BUS DESK =============================== -->
+<main id="deck-bus" class="deck" hidden>
+    <section id="p-duck" class="panel">
+        <div class="panel-title"><span>sidechain scope / music bus duckGain.gain</span><b id="bd-duck">rest 1.00</b>
+        </div>
+        <div class="screen">
+            <canvas id="cv-duck"></canvas>
+        </div>
+        <p class="note">The <b>DUCK</b> button dips the music bus under a fast <em>attack</em> and lets it recover on a
+            slow <em>release</em> - <b>0.05s</b> vs <b>0.30s</b> time constants. The dip is drawn cyan, the recovery
+            amber: a duck that attacked and released at the same rate would sound like a mistake, and here you can see
+            the asymmetry. <b>AUTO</b> arms <em>duckOn(sfx, music)</em> so firing the sting dips music on its own.</p>
     </section>
 
     <section id="p-meters" class="panel">
-        <div class="panel-title"><span>bus meters / AnalyserNode tapped on busNode()</span></div>
+        <div class="panel-title"><span>VU / level() signal, RMS at ~10 Hz</span><b>per bus</b></div>
         <div class="screen">
-            <canvas id="cv-meters"></canvas>
+            <canvas id="cv-vu"></canvas>
         </div>
     </section>
 
     <section id="p-strips" class="panel">
-        <div class="panel-title"><span>mixer / busVolume() + busMuted() signals</span></div>
+        <div class="panel-title"><span>mix / busVolume + busMuted signals</span></div>
         <div id="strips"></div>
         <div class="row">
             <span class="lbl">master</span>
             <button id="b-mute">mute</button>
             <span class="note" id="storage-note">lite_audio_muted = false</span>
         </div>
-        <p class="note">Every write lands as <em>setTargetAtTime(target, now, 0.01)</em>, never a raw <em>.value =</em>.
-            Mute a bus mid-tone and watch the trace bend instead of stepping - that bend is the click you do not hear.
-            Master mute survives a reload: it is persisted under the same localStorage key <em>lite-audio-manager</em>
-            used, on purpose.</p>
-    </section>
-</main>
-
-<!-- ============================ VOICES =================================== -->
-<main id="deck-voices" class="deck" hidden>
-    <section id="p-matrix" class="panel">
-        <div class="panel-title"><span>voice matrix / one AudioPool per bus, 8 channels each</span><b id="v-active">0
-            voices</b></div>
-        <div class="screen">
-            <canvas id="cv-matrix"></canvas>
-        </div>
-    </section>
-
-    <section id="p-twins" class="panel">
-        <div class="panel-title"><span>the twin-handle trap</span></div>
         <div class="row">
-            <button id="b-twins">issue twin handles</button>
-            <button id="b-stop-sfx">stop the sfx one</button>
-            <button id="b-overrun">overrun sfx (10 lasers into 8 channels)</button>
+            <span class="lbl">ducking</span>
+            <button id="b-sting">fire sting (sfx)</button>
+            <button id="b-duck">DUCK music</button>
+            <button id="b-auto" aria-pressed="false">AUTO duckOn</button>
         </div>
-        <p class="note" id="twin-note">Every pool counts channels and generations from zero, so the first play on <em>sfx</em>
-            and the first play on <em>ui</em> both come back as raw pool handle <b>0x00000000</b>. Press <em>issue twin
-                handles</em> to see it.</p>
-    </section>
-
-    <section id="p-handles" class="panel">
-        <div class="panel-title"><span>handles issued</span><b>newest first</b></div>
-        <div class="tbl" id="handles"></div>
-        <div class="empty" id="h-empty">no handles yet</div>
-        <p class="note">The engine tags the bus above the pool's 32 bits: <em>busIndex * 2^32 + poolHandle</em>. The raw
-            column is what the pool returned; the bus column is what makes the handle name one voice engine-wide.
-            Without the tag, <em>stop()</em> on an sfx handle would also kill whatever sat on channel 0 of every other
-            bus.</p>
+        <p class="note">Volume and mute ride the bus's own gain; the duck rides a <b>separate</b> sidechain node, so a
+            duck and a fader move compose instead of clobbering each other. Master mute persists under
+            <em>lite_audio_muted</em> - the same key the old Howler manager used.</p>
     </section>
 </main>
 
-<!-- ============================ MUSIC ==================================== -->
-<main id="deck-music" class="deck" hidden>
-    <section id="p-xfade" class="panel">
-        <div class="panel-title"><span>crossfade scope / xfadeGain per track</span><b id="power-now">power 0.00</b>
-        </div>
+<!-- ============================ CROSSFADE DECK ========================= -->
+<main id="deck-xfade" class="deck" hidden>
+    <section id="p-xscope" class="panel">
+        <div class="panel-title"><span>crossfade scope / xfadeGain per track + combined power</span><b
+                id="xf-power">power 0.00</b></div>
         <div class="screen">
             <canvas id="cv-xfade"></canvas>
         </div>
-        <p class="note">Two gains and the power they add up to, <em>sqrt(a^2 + b^2)</em>. The engine curves both sides
-            on <em>sin</em> and <em>cos</em>, so the white line holds at 1.0 across the whole fade. A linear crossfade
-            sags to <b>0.71</b> in the middle - the hole you hear in the mix.</p>
+        <p class="note">Two gains and the power they sum to, <em>sqrt(a^2 + b^2)</em>. The engine curves both sides on
+            <em>sin</em> / <em>cos</em>, so the white line holds at 1.0 across the fade. A linear crossfade sags to
+            <b>0.71</b> in the middle - the hole you would hear.</p>
     </section>
 
-    <section id="p-tracks" class="panel">
+    <section id="p-rings" class="panel">
         <div class="panel-title"><span>transport / trackPosition + trackDuration signals</span></div>
         <div class="screen">
-            <canvas id="cv-tracks"></canvas>
+            <canvas id="cv-rings"></canvas>
         </div>
     </section>
 
-    <section id="p-music-ctl" class="panel">
-        <div class="panel-title"><span>music</span><b id="music-hint">unlock on scene 1 first</b></div>
+    <section id="p-xfade-ctl" class="panel">
+        <div class="panel-title"><span>deck</span><b id="xf-hint">unlock on scene 4 first</b></div>
         <div class="row">
-            <span class="lbl">theme / native loop</span>
-            <button data-track-play="theme">play</button>
-            <button data-track-stop="theme">stop</button>
-            <button data-track-pause="theme">pause</button>
-            <button data-track-resume="theme">resume</button>
-        </div>
-        <div class="row">
-            <span class="lbl">boss / loopStart 2s, loopEnd 6s</span>
-            <button data-track-play="boss">play</button>
-            <button data-track-stop="boss">stop</button>
-            <button data-track-pause="boss">pause</button>
-            <button data-track-resume="boss">resume</button>
+            <button data-track-play="theme">play theme</button>
+            <button data-track-play="boss">play boss</button>
+            <button id="b-stop-music">stop music bus</button>
         </div>
         <div class="slider">
-            <label for="s-xfade">crossfade</label>
-            <input id="s-xfade" type="range" min="100" max="2000" step="50" value="800"/>
-            <output id="o-xfade">800ms</output>
+            <label for="s-xfade">fade</label>
+            <input id="s-xfade" type="range" min="100" max="3000" step="50" value="1200"/>
+            <output id="o-xfade">1200ms</output>
         </div>
         <div class="row">
             <button id="b-xf-boss">crossfade theme -&gt; boss</button>
             <button id="b-xf-theme">crossfade boss -&gt; theme</button>
         </div>
         <div class="row">
-            <button id="b-exclusive">playExclusive(boss)</button>
-            <button id="b-stop-music">stopBus(music)</button>
+            <span class="lbl">mix snapshots / captureSnapshot + applySnapshot(ms)</span>
+            <button id="b-snap-a">apply A (music up)</button>
+            <button id="b-snap-b">apply B (sfx up)</button>
         </div>
-        <p class="note">Tracks stream through <em>MediaElementAudioSourceNode</em> into the same buses as the SFX, so
-            the faders on scene 3 move them too. <b>stop then resume</b> is the one to try: stopTrack fades the gain to
-            zero, so resume has to put it back or the track decodes, reports itself playing, and is silent.</p>
-        <p class="note">Boss loops on custom points, so the engine seeks on <em>timeupdate</em> instead of using <em>element.loop</em>.
-            That event fires about four times a second, so the seek can land up to ~250ms late - watch the playhead
-            overshoot the loop marker before it snaps back. An honest limit, not a bug to hide.</p>
+        <p class="note">The A/B snapshots capture every bus's volume and mute as data, then morph the whole desk between
+            them over the fade time - riding the same sidechain node the duck uses, so a snapshot applied mid-fade picks
+            up from where the sound actually is. Fire a crossfade and hit <b>A</b> halfway: no click.</p>
     </section>
 </main>
 
+<!-- ============================ UNLOCK THEATER ========================= -->
+<main id="deck-unlock" class="deck" hidden>
+    <section id="p-fsm" class="panel">
+        <div class="panel-title"><span>context lifecycle / ctxState() + isAutoSuspended()</span><b id="fsm-now">suspended</b>
+        </div>
+        <svg class="fsm" id="fsm" viewBox="0 0 560 190" role="img" aria-label="context state machine">
+            <defs>
+                <marker id="ah" markerWidth="7" markerHeight="7" refX="6" refY="2.5" orient="auto">
+                    <path d="M0,0 L0,5 L6,2.5 z" fill="#3f5f42"/>
+                </marker>
+            </defs>
+            <path class="edge" id="e-unlock" d="M110,74 L206,74" marker-end="url(#ah)"/>
+            <text class="edge-label" x="112" y="66">gesture -&gt; pulse -&gt; resume()</text>
+            <path class="edge" id="e-dorm" d="M250,96 L250,150" marker-end="url(#ah)"/>
+            <text class="edge-label" x="256" y="128">N s silent (auto-suspend)</text>
+            <path class="edge" id="e-wake" d="M226,150 L226,96" marker-end="url(#ah)"/>
+            <text class="edge-label" x="90" y="128">play() -&gt; resume()</text>
+            <path class="edge" id="e-int" d="M294,66 L400,44" marker-end="url(#ah)"/>
+            <text class="edge-label" x="300" y="44">phone call (iOS)</text>
+            <path class="edge" id="e-intback" d="M404,64 L300,82" marker-end="url(#ah)"/>
+            <text class="edge-label" x="316" y="98">resume()</text>
+            <g class="state-node" data-node="suspended">
+                <circle cx="66" cy="74" r="42"/>
+                <text x="66" y="78">suspended</text>
+            </g>
+            <g class="state-node" data-node="running">
+                <circle cx="250" cy="74" r="42"/>
+                <text x="250" y="78">running</text>
+            </g>
+            <g class="state-node" data-node="dormant">
+                <circle cx="250" cy="162" r="26"/>
+                <text x="250" y="166">dormant</text>
+            </g>
+            <g class="state-node" data-node="interrupted">
+                <circle cx="446" cy="40" r="30"/>
+                <text x="446" y="44">interrupted</text>
+            </g>
+        </svg>
+        <p class="note">The engine unlocks on the first <em>touchstart / mousedown / keydown</em> at capture phase:
+            silent-buffer pulse, <em>resume()</em>, flush the queue. This demo hands it a <b>fake window</b> so the one
+            gesture you normally get is replayable. <b>dormant</b> is AU1's auto-suspend; <b>interrupted</b> is the iOS
+            OS state - the simulate button walks it because a desktop context will not.</p>
+    </section>
+
+    <section id="p-unlock-ctl" class="panel">
+        <div class="panel-title"><span>dispatch</span><b id="lock-state">locked</b></div>
+        <div class="row">
+            <span class="lbl">live</span>
+            <button id="b-gesture" class="on">dispatch first gesture</button>
+            <button id="b-relock">re-lock and rebuild</button>
+        </div>
+        <div class="row">
+            <span class="lbl">auto-suspend (real, desktop)</span>
+            <button id="b-arm">arm (4s idle)</button>
+            <button id="b-wake">play to wake</button>
+            <span class="note" id="arm-note">disarmed</span>
+        </div>
+        <div class="row">
+            <span class="lbl">iOS</span>
+            <button id="b-sim-ios">simulate interruption</button>
+            <span class="note" id="ios-note">enableAutoSuspend() on iOS: <b id="ios-verdict">-</b></span>
+        </div>
+        <p class="note">Arm auto-suspend, stop touching the page for four seconds, and the context suspends itself to
+            stop the hardware spinning on silence - <b>dormant</b> lights amber. Any <em>play()</em> wakes it through the
+            same unlock path, so it can never leave the page un-unlocked. On iOS that round-trip can demand a fresh
+            gesture, so <em>enableAutoSuspend()</em> refuses there and returns <b>false</b> - the verdict on the
+            right is read from a probe engine built with an iPhone user-agent.</p>
+    </section>
+
+    <section id="p-ulog" class="panel">
+        <div class="panel-title"><span>transition log</span><b>ctxState + unlock + visibility</b></div>
+        <div id="ulog"></div>
+    </section>
+</main>
+
+<!-- ============================ SHARED RACK ============================ -->
 <div class="rack">
     <section class="panel">
         <div class="panel-title"><span>engine</span></div>
@@ -966,10 +977,10 @@
             <dd id="e-buses">-</dd>
             <dt>pool capacity</dt>
             <dd id="e-cap">-</dd>
-            <dt>queue limit</dt>
-            <dd id="e-qlimit">-</dd>
-            <dt>sounds ready</dt>
-            <dd id="e-ready">-</dd>
+            <dt>voices active</dt>
+            <dd id="e-active">-</dd>
+            <dt>frame alloc</dt>
+            <dd id="e-alloc">0 b/frame</dd>
         </dl>
         <div class="row">
             <button id="b-stopall">stop all voices</button>
@@ -982,12 +993,40 @@
     </section>
 </div>
 
+<!-- ============================ FOOTER ================================= -->
+<section id="footer">
+    <div class="col">
+        <h2>retire Howler in one import</h2>
+        <p class="note">This engine ships a <em>./compat</em> drop-in for the old <b>lite-audio-manager</b>. A game
+            migrates by changing one line and <b>removing</b> a dependency - there is no Howler underneath.</p>
+        <button id="b-migrate" aria-pressed="false">show the diff</button>
+        <pre class="diff" id="migrate-diff" hidden><span class="del">- import { audioManager } from 'lite-audio-manager';</span>
+<span class="add">+ import { audioManager } from '@zakkster/lite-audio/compat';</span>
+
+<span class="del">- npm i lite-audio-manager howler</span>
+<span class="add">+ npm i @zakkster/lite-audio @zakkster/lite-signal @zakkster/lite-audio-pool</span></pre>
+        <p class="note">Every method is certified against a test in <a href="../PARITY.md">PARITY.md</a>; the whole
+            migration is <a href="../MIGRATION.md">MIGRATION.md</a>.</p>
+    </div>
+    <div class="col">
+        <h2>zero-GC gate, on the page</h2>
+        <p class="note">Switch all four scenes 100 times and read the heap delta. A demo that allocates while displaying
+            a heap graph is the worst possible advertisement, so this one does not. Chrome only - needs
+            <em>performance.memory</em>; run with <em>--enable-precise-memory-info</em> for a tight number. The manual
+            DevTools protocol is in <a href="../DEMO-GATE.md">DEMO-GATE.md</a>.</p>
+        <div id="soak">
+            <button id="b-soak">run soak (100 x switch)</button>
+            <output id="soak-out">idle</output>
+        </div>
+    </div>
+</section>
+
 <div id="gate">
     <div id="gate-inner">
         <div class="panel-title"><span>engine offline</span></div>
-        <p>Starting creates an AudioContext, immediately suspends it so the engine boots <em>locked</em>, synthesizes
-            eight sounds offline, and wires them in. Nothing is audible until you dispatch the gesture yourself, on
-            scene 1.</p>
+        <p>Booting creates an AudioContext, immediately suspends it so the engine starts <em>locked</em>, synthesizes a
+            handful of sounds and two music loops offline (no asset folder), and wires them in. Nothing is audible until
+            you dispatch the gesture yourself, on scene 4.</p>
         <button id="gate-btn">boot the engine</button>
     </div>
 </div>
@@ -1000,42 +1039,42 @@
     "@zakkster/lite-audio-pool": "https://esm.sh/@zakkster/lite-audio-pool@^1.1.0"
   }
 }
-
 </script>
 
 <script type="module">
     import {LiteAudio} from '@zakkster/lite-audio';
     import {effect, dispose} from '@zakkster/lite-signal';
 
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
     // Config
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
 
     const SR = 44100;
-    const BUSES = ['sfx', 'ui', 'music'];
+    const BUSES = ['music', 'sfx', 'ui'];
+    const B_MUSIC = 0, B_SFX = 1, B_UI = 2;
     const POOL_CAPACITY = 8;
-    const QUEUE_LIMIT = 4;
-    const THUNDER_LATENCY_MS = 2600;
+    const QUEUE_LIMIT = 8;
 
-    const TELEM_MASK = 0x07;
-    const TRACE_CAP = 512, TRACE_MASK = 511;
-    const LOG_ROWS = 10;
-    const HANDLE_ROWS = 6;
+    const TELEM_MASK = 0x07;               // ~7.5 Hz textContent throttle at 60fps
+    const SCOPE_N = 512;                    // AnalyserNode fftSize
+    const TRACE_CAP = 480, TRACE_MASK = 479;
+    const LOG_ROWS = 9;
+    const ULOG_ROWS = 10;
+    const HANDLE_ROWS = 7;
 
-    // soundId -> [busName, synthFn, volume, pitchVar]
+    // soundId -> [bus, synthFn, volume, pitchVar]
     const SOUNDS = [
-        ['laser', 'sfx', synthLaser, 0.8, 0.15],
+        ['laser', 'sfx', synthLaser, 0.8, 0.16],
         ['hit', 'sfx', synthHit, 0.9, 0.10],
-        ['coin', 'sfx', synthCoin, 0.7, 0.05],
-        ['thunder', 'sfx', synthThunder, 0.9, 0.00],
+        ['coin', 'sfx', synthCoin, 0.7, 0.06],
+        ['sting', 'sfx', synthSting, 0.9, 0.00],
         ['click', 'ui', synthClick, 0.6, 0.00],
-        ['blip', 'ui', synthBlip, 0.6, 0.08],
-        ['pad', 'music', synthPad, 0.5, 0.00],
+        ['blip', 'ui', synthBlip, 0.6, 0.09],
     ];
-    const BROKEN_ID = 'broken';
+    // Strafe fires these, cycling, one per bus so both pools fill.
+    const STRAFE_SFX = ['laser', 'hit', 'coin'];
+    const STRAFE_UI = ['click', 'blip'];
 
-    // Music. Streamed through <audio> rather than decoded into a pool, so these are
-    // rendered offline like the SFX but handed to defineTracks() instead of defineSounds().
     const TRACKS = [
         ['theme', synthTheme, 0.7, {loop: true}],
         ['boss', synthBoss, 0.7, {loop: true, loopStart: 2, loopEnd: 6}],
@@ -1046,6 +1085,7 @@
     const H_LABEL = ['LIVE', 'ENDED', 'STOLEN', 'STOPPED'];
     const H_CLASS = ['st live', 'st ended', 'st stolen', 'st stopped'];
 
+    // ---- colors: prefer wide-gamut oklch, fall back to hex ----
     const probe = document.createElement('canvas').getContext('2d');
     probe.fillStyle = '#000000';
     probe.fillStyle = 'oklch(0.9 0.28 145)';
@@ -1061,84 +1101,86 @@
     const C_INK = OKLCH ? 'oklch(0.86 0.10 145)' : '#b8e6b8';
     const C_CLEAR = OKLCH ? 'oklch(0.18 0.02 145)' : '#0a100b';
 
-    const BUS_COLOR = [C_PHOS, C_AMBER, C_CYAN];
+    const BUS_COLOR = [C_CYAN, C_PHOS, C_AMBER];  // music, sfx, ui
     const TRACK_COLOR = [C_PHOS, C_HOT];
     const FONT_S = '9px ui-monospace, Menlo, Consolas, monospace';
     const FONT_M = '10px ui-monospace, Menlo, Consolas, monospace';
 
-    // ---------------------------------------------------------------------------
-    // DOM
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
+    // DOM refs (cached once)
+    // ==========================================================================
 
     const $tabBtns = document.querySelectorAll('#tabs [data-scene]');
     const $decks = [
-        document.getElementById('deck-unlock'),
-        document.getElementById('deck-loader'),
-        document.getElementById('deck-mixer'),
         document.getElementById('deck-voices'),
-        document.getElementById('deck-music'),
+        document.getElementById('deck-bus'),
+        document.getElementById('deck-xfade'),
+        document.getElementById('deck-unlock'),
     ];
 
     const $bState = document.getElementById('b-state');
     const $bUnlocked = document.getElementById('b-unlocked');
     const $bVoices = document.getElementById('b-voices');
-    const $lockState = document.getElementById('lock-state');
-    const $fsmCtxNow = document.getElementById('fsm-ctx-now');
-    const $fsmLoadNow = document.getElementById('fsm-load-now');
-    const $ctxNodes = document.querySelectorAll('#fsm-ctx [data-ctx]');
-    const $loadNodes = document.querySelectorAll('#fsm-load [data-load]');
+    const $bHeap = document.getElementById('b-heap');
 
-    const $queue = document.getElementById('queue');
-    const $qEmpty = document.getElementById('q-empty');
-    const $qSize = document.getElementById('q-size');
-    const $cPlayed = document.getElementById('c-played');
-    const $cQueued = document.getElementById('c-queued');
-    const $cCollapsed = document.getElementById('c-collapsed');
-    const $cDropped = document.getElementById('c-dropped');
-    const $bGesture = document.getElementById('b-gesture');
-    const $bRelock = document.getElementById('b-relock');
-    const $bSpam = document.getElementById('b-spam');
-    const $bFlood = document.getElementById('b-flood');
+    const $vgActive = document.getElementById('vg-active');
+    const $vgRate = document.getElementById('vg-rate');
+    const $handles = document.getElementById('handles');
+    const $hEmpty = document.getElementById('h-empty');
 
-    const $sounds = document.getElementById('sounds');
-    const $bReload = document.getElementById('b-reload');
-    const $bPlaySel = document.getElementById('b-play-selected');
-    const $bRace = document.getElementById('b-race');
-
+    const $bdDuck = document.getElementById('bd-duck');
     const $strips = document.getElementById('strips');
     const $bMute = document.getElementById('b-mute');
     const $storageNote = document.getElementById('storage-note');
+    const $bSting = document.getElementById('b-sting');
+    const $bDuck = document.getElementById('b-duck');
+    const $bAuto = document.getElementById('b-auto');
 
-    const $vActive = document.getElementById('v-active');
-    const $handles = document.getElementById('handles');
-    const $hEmpty = document.getElementById('h-empty');
-    const $bTwins = document.getElementById('b-twins');
-    const $bStopSfx = document.getElementById('b-stop-sfx');
-    const $bOverrun = document.getElementById('b-overrun');
-    const $twinNote = document.getElementById('twin-note');
-
-    const $eBuses = document.getElementById('e-buses');
-    const $eCap = document.getElementById('e-cap');
-    const $eQlimit = document.getElementById('e-qlimit');
-    const $eReady = document.getElementById('e-ready');
-    const $bStopAll = document.getElementById('b-stopall');
-
-    const $musicHint = document.getElementById('music-hint');
-    const $powerNow = document.getElementById('power-now');
+    const $xfPower = document.getElementById('xf-power');
+    const $xfHint = document.getElementById('xf-hint');
     const $sXfade = document.getElementById('s-xfade');
     const $oXfade = document.getElementById('o-xfade');
     const $bXfBoss = document.getElementById('b-xf-boss');
     const $bXfTheme = document.getElementById('b-xf-theme');
-    const $bExclusive = document.getElementById('b-exclusive');
     const $bStopMusic = document.getElementById('b-stop-music');
+    const $bSnapA = document.getElementById('b-snap-a');
+    const $bSnapB = document.getElementById('b-snap-b');
+
+    const $fsmNow = document.getElementById('fsm-now');
+    const $lockState = document.getElementById('lock-state');
+    const $fsmNodes = document.querySelectorAll('#fsm [data-node]');
+    const $eUnlock = document.getElementById('e-unlock');
+    const $eDorm = document.getElementById('e-dorm');
+    const $eWake = document.getElementById('e-wake');
+    const $eInt = document.getElementById('e-int');
+    const $eIntback = document.getElementById('e-intback');
+    const $bGesture = document.getElementById('b-gesture');
+    const $bRelock = document.getElementById('b-relock');
+    const $bArm = document.getElementById('b-arm');
+    const $bWake = document.getElementById('b-wake');
+    const $armNote = document.getElementById('arm-note');
+    const $bSimIos = document.getElementById('b-sim-ios');
+    const $iosVerdict = document.getElementById('ios-verdict');
+
+    const $eBuses = document.getElementById('e-buses');
+    const $eCap = document.getElementById('e-cap');
+    const $eActive = document.getElementById('e-active');
+    const $eAlloc = document.getElementById('e-alloc');
+    const $bStopAll = document.getElementById('b-stopall');
 
     const $log = document.getElementById('log');
+    const $ulog = document.getElementById('ulog');
     const $gate = document.getElementById('gate');
     const $gateBtn = document.getElementById('gate-btn');
 
-    // ---------------------------------------------------------------------------
+    const $bMigrate = document.getElementById('b-migrate');
+    const $migrateDiff = document.getElementById('migrate-diff');
+    const $bSoak = document.getElementById('b-soak');
+    const $soakOut = document.getElementById('soak-out');
+
+    // ==========================================================================
     // Canvas
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
 
     function mkCanvas(id) {
         const el = document.getElementById(id);
@@ -1152,12 +1194,13 @@
         return {el, c, w: 1, h: 1};
     }
 
-    const cvGain = mkCanvas('cv-gain');
-    const cvMeters = mkCanvas('cv-meters');
-    const cvMatrix = mkCanvas('cv-matrix');
+    const cvGrid = mkCanvas('cv-grid');
+    const cvVScope = mkCanvas('cv-vscope');
+    const cvDuck = mkCanvas('cv-duck');
+    const cvVu = mkCanvas('cv-vu');
     const cvXfade = mkCanvas('cv-xfade');
-    const cvTracks = mkCanvas('cv-tracks');
-    const ALL_CV = [cvGain, cvMeters, cvMatrix, cvXfade, cvTracks];
+    const cvRings = mkCanvas('cv-rings');
+    const ALL_CV = [cvGrid, cvVScope, cvDuck, cvVu, cvXfade, cvRings];
     let needResize = 1;
 
     function sizeAll() {
@@ -1178,10 +1221,9 @@
     });
     for (const rec of ALL_CV) ro.observe(rec.el);
 
-    // ---------------------------------------------------------------------------
-    // Synthesis. Every asset is rendered offline, encoded to WAV, and served to the
-    // engine as a blob: URL - a real fetch, a real decodeAudioData, no asset folder.
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
+    // Synthesis: rendered offline, encoded to WAV, served as blob: URLs.
+    // ==========================================================================
 
     async function render(seconds, build) {
         const off = new OfflineAudioContext(1, Math.ceil(SR * seconds), SR);
@@ -1198,6 +1240,21 @@
             d[i] = (Math.random() * 2 - 1) * Math.pow(decay, curve);
         }
         return buf;
+    }
+
+    function note(off, out, at, dur, hz, type) {
+        const o = off.createOscillator();
+        o.type = type || 'square';
+        o.frequency.value = hz;
+        const g = off.createGain();
+        g.gain.setValueAtTime(0.0001, at);
+        g.gain.linearRampToValueAtTime(0.22, at + 0.005);
+        g.gain.setValueAtTime(0.22, at + dur * 0.6);
+        g.gain.exponentialRampToValueAtTime(0.001, at + dur);
+        o.connect(g);
+        g.connect(out);
+        o.start(at);
+        o.stop(at + dur);
     }
 
     function synthLaser() {
@@ -1254,49 +1311,28 @@
         });
     }
 
-    function note(off, out, at, dur, hz) {
-        const o = off.createOscillator();
-        o.type = 'square';
-        o.frequency.value = hz;
-        const g = off.createGain();
-        g.gain.setValueAtTime(0.0001, at);
-        g.gain.linearRampToValueAtTime(0.22, at + 0.005);
-        g.gain.setValueAtTime(0.22, at + dur * 0.6);
-        g.gain.exponentialRampToValueAtTime(0.001, at + dur);
-        o.connect(g);
-        g.connect(out);
-        o.start(at);
-        o.stop(at + dur);
-    }
-
-    function synthThunder() {
-        return render(1.20, (off, out) => {
-            const n = off.createBufferSource();
-            n.buffer = noiseBuffer(off, 1.15, 1.2);
+    function synthSting() {
+        return render(0.55, (off, out) => {
+            // A brassy hit with tail - the thing you duck the music under.
             const lp = off.createBiquadFilter();
             lp.type = 'lowpass';
-            lp.frequency.setValueAtTime(1800, 0);
-            lp.frequency.exponentialRampToValueAtTime(120, 1.1);
+            lp.frequency.setValueAtTime(2600, 0);
+            lp.frequency.exponentialRampToValueAtTime(600, 0.5);
             const g = off.createGain();
             g.gain.setValueAtTime(0.0001, 0);
-            g.gain.linearRampToValueAtTime(0.7, 0.06);
-            g.gain.exponentialRampToValueAtTime(0.001, 1.15);
-            n.connect(lp);
+            g.gain.linearRampToValueAtTime(0.5, 0.01);
+            g.gain.exponentialRampToValueAtTime(0.001, 0.5);
             lp.connect(g);
             g.connect(out);
-            n.start(0);
-
-            const sub = off.createOscillator();
-            const sg = off.createGain();
-            sub.frequency.setValueAtTime(70, 0);
-            sub.frequency.exponentialRampToValueAtTime(28, 0.9);
-            sg.gain.setValueAtTime(0.0001, 0);
-            sg.gain.linearRampToValueAtTime(0.5, 0.02);
-            sg.gain.exponentialRampToValueAtTime(0.001, 1.0);
-            sub.connect(sg);
-            sg.connect(out);
-            sub.start(0);
-            sub.stop(1.2);
+            for (let i = 0; i < 4; i++) {
+                const o = off.createOscillator();
+                o.type = 'sawtooth';
+                o.frequency.value = 220 * (1 + i * 0.5);
+                o.detune.value = (i - 1.5) * 7;
+                o.connect(lp);
+                o.start(0);
+                o.stop(0.55);
+            }
         });
     }
 
@@ -1334,35 +1370,7 @@
         });
     }
 
-    function synthPad() {
-        return render(3.20, (off, out) => {
-            const lp = off.createBiquadFilter();
-            lp.type = 'lowpass';
-            lp.Q.value = 5;
-            lp.frequency.setValueAtTime(260, 0);
-            lp.frequency.exponentialRampToValueAtTime(2400, 1.9);
-            lp.frequency.exponentialRampToValueAtTime(320, 3.15);
-            const g = off.createGain();
-            g.gain.setValueAtTime(0.0001, 0);
-            g.gain.linearRampToValueAtTime(0.26, 0.35);
-            g.gain.setValueAtTime(0.26, 2.7);
-            g.gain.exponentialRampToValueAtTime(0.001, 3.15);
-            lp.connect(g);
-            g.connect(out);
-            for (let i = 0; i < 3; i++) {
-                const o = off.createOscillator();
-                o.type = 'sawtooth';
-                o.frequency.value = 110 * (i === 2 ? 1.5 : 1);
-                o.detune.value = (i - 1) * 9;
-                o.connect(lp);
-                o.start(0);
-                o.stop(3.2);
-            }
-        });
-    }
-
-    // Eight seconds each: long enough to crossfade over, short enough that the pair
-    // costs about a megabyte of WAV.
+    // Eight seconds each: long enough to crossfade over, ~1 MB of WAV per pair.
     function synthTheme() {
         return render(8.0, (off, out) => {
             const lp = off.createBiquadFilter();
@@ -1473,50 +1481,32 @@
 
     const urlById = new Map();
     const durById = new Map();
-    const latencyByUrl = new Map();
 
     async function buildAssets() {
         for (const [id, , synth] of SOUNDS) {
             const buf = await synth();
-            const url = URL.createObjectURL(encodeWav(buf));
-            urlById.set(id, url);
+            urlById.set(id, URL.createObjectURL(encodeWav(buf)));
             durById.set(id, buf.duration);
-            if (id === 'thunder') latencyByUrl.set(url, THUNDER_LATENCY_MS);
         }
         for (const [id, synth] of TRACKS) {
             const buf = await synth();
             urlById.set(id, URL.createObjectURL(encodeWav(buf)));
             durById.set(id, buf.duration);
         }
-        urlById.set(BROKEN_ID, 'demo://unreachable-asset.mp3');
-        durById.set(BROKEN_ID, 0);
     }
 
-    // Injected fetch: same contract the engine expects, with a stopwatch bolted on so
-    // 'loading' is a state you can actually see rather than a frame you miss.
-    async function demoFetch(url) {
-        if (url === urlById.get(BROKEN_ID)) {
-            // Synthetic 404. The loader only reads resp.ok and resp.status, so this walks
-            // the identical error path a dead CDN would - without firing a real request
-            // that paints a red line in the console of a demo that is working correctly.
-            // Want the real thing? Delete this branch and point BROKEN_ID at a 404 URL.
-            await new Promise((r) => setTimeout(r, 400));
-            return {ok: false, status: 404, statusText: 'Not Found'};
-        }
-        const wait = latencyByUrl.get(url) || 0;
-        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-        return fetch(url);
-    }
+    // ==========================================================================
+    // Fake window: makes the one-shot unlock replayable. `iosUA` flips the
+    // navigator so a probe engine sees an iPhone and enableAutoSuspend() refuses.
+    // ==========================================================================
 
-    // ---------------------------------------------------------------------------
-    // Fake window: the engine unlocks on the first real gesture at capture phase, so
-    // with a real window this demo would unlock the instant you touched any button.
-    // opts.window is documented as a test injectable; here it makes the queue replayable.
-    // ---------------------------------------------------------------------------
-
-    function mkFakeWindow() {
+    function mkFakeWindow(iosUA) {
         const cbs = [];
+        const nav = iosUA
+            ? {userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)', maxTouchPoints: 5}
+            : {userAgent: 'demo-desktop', maxTouchPoints: 0};
         return {
+            navigator: nav,
             addEventListener(evt, cb) {
                 cbs.push(cb);
             },
@@ -1528,86 +1518,101 @@
         };
     }
 
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
     // State
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
 
     let ctx = null;
     let engine = null;
     let fakeWin = null;
     let effects = [];
-    let analysers = null;
-    let sink = null;
-    let meterBuf = null;
+    let scopeAnalyser = null;     // tap on the sfx bus, allocated ONCE
+    let scopeSink = null;
+    const scopeBuf = new Float32Array(SCOPE_N);
 
     let scene = 0;
-    let selected = 'laser';
     let frameCount = 0;
+    let autoDuck = false;
 
-    let cPlayed = 0, cQueued = 0, cCollapsed = 0, cDropped = 0;
+    // voices/s rate: count fires in a sliding window, computed on the throttle pass.
+    let fireCount = 0;
+    let lastRateCount = 0;
+    let lastRateAt = 0;
+    let voicesPerSec = 0;
 
-    // gain traces: one ring per bus + master
-    const traces = [];
-    for (let i = 0; i <= BUSES.length; i++) traces.push(new Float32Array(TRACE_CAP));
-    let traceHead = 0;
+    // duck sidechain trace (music bus duckGain.gain), one ring
+    const duckTrace = new Float32Array(TRACE_CAP);
+    let duckHead = 0;
 
-    const levels = new Float32Array(BUSES.length);
-    const peaks = new Float32Array(BUSES.length);
-
-    // One xfadeGain ring per track, plus the power they add up to.
+    // crossfade traces
     const xfTrace = [new Float32Array(TRACE_CAP), new Float32Array(TRACE_CAP)];
     const xfPower = new Float32Array(TRACE_CAP);
     let xfHead = 0;
-    let xfadeMs = 0;   // seeded from the slider at init
+    let xfadeMs = 1200;
 
-    // Position strings are formatted on the throttle pass and drawn from this cache:
-    // no toFixed inside the frame loop.
+    // VU: level() peak-hold, pre-allocated per bus
+    const vuLevel = new Float32Array(BUSES.length);
+    const vuPeak = new Float32Array(BUSES.length);
+
+    // position text cache (formatted on throttle pass, not in the frame loop)
     const posText = ['0.0 / 0.0s', '0.0 / 0.0s'];
 
-    // handle table
+    // handle table: parallel typed columns, no per-frame allocation
     const hHandle = new Float64Array(HANDLE_ROWS);
     const hStatus = new Uint8Array(HANDLE_ROWS);
-    const hEnd = new Float64Array(HANDLE_ROWS);   // f64: absolute ctx time, same trap as the pool's
+    const hEnd = new Float64Array(HANDLE_ROWS);
     const hBus = new Array(HANDLE_ROWS);
     const hSound = new Array(HANDLE_ROWS);
     let hCount = 0;
-    let twinSfx = -1, twinUi = -1;
+    let handlesDirty = 1;
 
-    // ---------------------------------------------------------------------------
-    // Log
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
+    // Logs (fixed row pool, ring-buffered)
+    // ==========================================================================
 
-    const $logRows = [];
-    for (let i = 0; i < LOG_ROWS; i++) {
-        const row = document.createElement('div');
-        row.className = 'lrow';
-        const t = document.createElement('span');
-        const tag = document.createElement('span');
-        tag.className = 'tag';
-        const msg = document.createElement('span');
-        msg.className = 'msg';
-        row.append(t, tag, msg);
-        $log.appendChild(row);
-        $logRows.push({row, t, tag, msg});
+    function mkLog(host, rows) {
+        const views = [];
+        for (let i = 0; i < rows; i++) {
+            const row = document.createElement('div');
+            row.className = 'lrow';
+            const t = document.createElement('span');
+            const tag = document.createElement('span');
+            tag.className = 'tag';
+            const msg = document.createElement('span');
+            msg.className = 'msg';
+            row.append(t, tag, msg);
+            host.appendChild(row);
+            views.push({row, t, tag, msg});
+        }
+        return {views, ring: new Array(rows * 2).fill(null), head: 0, dirty: 1};
     }
-    const logRing = new Array(LOG_ROWS * 2).fill(null);
-    let logHead = 0;
-    let logDirty = 1;
+
+    const mainLog = mkLog($log, LOG_ROWS);
+    const uLog = mkLog($ulog, ULOG_ROWS);
+
+    function logTo(L, kind, msg) {
+        L.ring[L.head % L.ring.length] = [nowSeconds(), kind, msg];
+        L.head++;
+        L.dirty = 1;
+    }
 
     function logPush(kind, msg) {
-        logRing[logHead % logRing.length] = [nowSeconds(), kind, msg];
-        logHead++;
-        logDirty = 1;
+        logTo(mainLog, kind, msg);
+    }
+
+    function uPush(kind, msg) {
+        logTo(uLog, kind, msg);
     }
 
     function nowSeconds() {
         return ctx ? ctx.currentTime : 0;
     }
 
-    function renderLog() {
-        for (let r = 0; r < LOG_ROWS; r++) {
-            const idx = logHead - 1 - r;
-            const view = $logRows[r];
+    function renderLog(L) {
+        const rows = L.views.length;
+        for (let r = 0; r < rows; r++) {
+            const idx = L.head - 1 - r;
+            const view = L.views[r];
             if (idx < 0) {
                 view.row.className = 'lrow';
                 view.t.textContent = '';
@@ -1615,7 +1620,7 @@
                 view.msg.textContent = '';
                 continue;
             }
-            const e = logRing[idx % logRing.length];
+            const e = L.ring[idx % L.ring.length];
             if (!e) continue;
             view.row.className = 'lrow ' + e[1];
             view.t.textContent = e[0].toFixed(2) + 's';
@@ -1624,50 +1629,76 @@
         }
     }
 
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
     // Boot / rebuild
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
 
     async function boot() {
         if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)({latencyHint: 'interactive'});
         await buildAssets();
-        await buildEngine();
+        probeIosRefusal();
+        await buildEngine(false);
     }
 
-    async function buildEngine() {
-        // Suspend first: init() reads ctx.state, and a context created inside a click
-        // handler is already 'running'. We want the engine to boot locked, on purpose.
+    // A throwaway engine built with an iPhone UA, to READ the real refusal rather
+    // than assert it from docs. Never wired to audio input; destroyed immediately.
+    function probeIosRefusal() {
+        try {
+            const win = mkFakeWindow(true);
+            const probeEngine = new LiteAudio({buses: [], window: win, document});
+            // enableAutoSuspend()'s iOS guard reads window.navigator only; it does
+            // not require init(), so this is a pure predicate read.
+            const armed = probeEngine.enableAutoSuspend({after: 5});
+            $iosVerdict.textContent = armed ? 'armed (unexpected)' : 'false (refused)';
+            $iosVerdict.style.color = armed ? C_HOT : C_PHOS;
+            try {
+                probeEngine.destroy();
+            } catch (e) {
+            }
+        } catch (e) {
+            $iosVerdict.textContent = 'probe failed';
+        }
+    }
+
+    async function buildEngine(iosMode) {
+        // Suspend first: init() reads ctx.state, and a context created inside a
+        // click handler is already 'running'. We want to boot locked, on purpose.
         try {
             await ctx.suspend();
-        } catch (e) { /* already suspended */
+        } catch (e) {
         }
 
-        fakeWin = mkFakeWindow();
+        fakeWin = mkFakeWindow(iosMode);
         engine = new LiteAudio({
-            buses: BUSES,
+            buses: [],                 // created below, with meters
             poolCapacity: POOL_CAPACITY,
             queueLimit: QUEUE_LIMIT,
             window: fakeWin,
             document: document,
-            fetch: demoFetch,
         });
         await engine.init(ctx);
 
-        attachTaps();
+        // Metered buses: level() reads off an AnalyserNode createBus taps.
+        for (const name of BUSES) engine.createBus(name, {meter: true});
+
+        attachScope();
         buildStrips();
         bindSignals();
-        resetCounters();
+        vuLevel.fill(0);
+        vuPeak.fill(0);
         hCount = 0;
-        twinSfx = -1;
-        twinUi = -1;
-        renderHandles();
+        handlesDirty = 1;
+        autoDuck = false;
+        $bAuto.classList.remove('on');
+        $bAuto.setAttribute('aria-pressed', 'false');
+        $armNote.textContent = 'disarmed';
 
-        $eBuses.textContent = BUSES.join(' / ');
+        $eBuses.textContent = 'master / ' + BUSES.join(' / ');
         $eCap.textContent = POOL_CAPACITY + ' per bus';
-        $eQlimit.textContent = QUEUE_LIMIT;
 
-        logPush('state', 'engine built, context suspended: locked');
-        defineAll();                                  // deliberately not awaited
+        logPush('state', 'engine built' + (iosMode ? ' (iOS UA)' : '') + ', suspended: locked');
+        uPush('state', 'boot: context suspended, engine locked');
+        defineAll();                  // deliberately not awaited
     }
 
     async function defineAll() {
@@ -1675,17 +1706,7 @@
         for (const [id, bus, , volume, pitchVar] of SOUNDS) {
             config[id] = {src: [urlById.get(id)], bus, volume, pitchVar};
         }
-        config[BROKEN_ID] = {src: [urlById.get(BROKEN_ID)], bus: 'sfx'};
-        buildSoundRows();
-
-        // Not awaited before binding: defineSounds() registers every sound record (and
-        // its loadState signal) synchronously, and only then awaits the fetches. Binding
-        // here catches idle -> loading -> ready live; binding after the await would only
-        // ever show the settled state.
-        const settled = engine.defineSounds(config);
-        bindLoadSignals();
-        await settled;
-        updateReadyCount();
+        await engine.defineSounds(config);
 
         const trackConfig = {};
         for (const [id, , volume, opts] of TRACKS) {
@@ -1695,41 +1716,19 @@
         bindTrackSignals();
     }
 
-    function bindTrackSignals() {
-        for (const id of TRACK_IDS) {
-            const load = engine.trackLoadState(id);
-            const playing = engine.trackPlaying(id);
-            if (!load || !playing) continue;
-            effects.push(effect(() => {
-                logPush('load', 'track ' + id + ' -> ' + load());
-            }));
-            effects.push(effect(() => {
-                const on = playing();
-                logPush(on ? 'play' : 'stop', 'track ' + id + (on ? ' playing' : ' stopped'));
-            }));
+    function attachScope() {
+        if (!scopeAnalyser) {
+            scopeAnalyser = ctx.createAnalyser();
+            scopeAnalyser.fftSize = SCOPE_N;
+            // A tap on a dead-end node is not reliably pulled; route through a
+            // muted sink into the destination. Allocated ONCE for the page's life.
+            scopeSink = ctx.createGain();
+            scopeSink.gain.value = 0;
+            scopeSink.connect(ctx.destination);
+            scopeAnalyser.connect(scopeSink);
         }
-    }
-
-    function attachTaps() {
-        if (!analysers) {
-            analysers = [];
-            for (let i = 0; i < BUSES.length; i++) {
-                const an = ctx.createAnalyser();
-                an.fftSize = 256;
-                analysers.push(an);
-            }
-            meterBuf = new Uint8Array(256);
-            // Analysers on a dead-end branch are not reliably pulled, so the taps land
-            // in a muted sink that is wired to the destination.
-            sink = ctx.createGain();
-            sink.gain.value = 0;
-            sink.connect(ctx.destination);
-            for (const an of analysers) an.connect(sink);
-        }
-        for (let i = 0; i < BUSES.length; i++) {
-            const node = engine.busNode(BUSES[i]);
-            if (node) node.connect(analysers[i]);
-        }
+        const node = engine.busNode('sfx');
+        if (node) node.connect(scopeAnalyser);
     }
 
     function disposeEffects() {
@@ -1742,38 +1741,24 @@
         effects.length = 0;
     }
 
-    async function rebuild(keepUnlocked) {
+    async function rebuild(keepUnlocked, iosMode) {
         disposeEffects();
         engine.destroy();
-        await buildEngine();
-        if (keepUnlocked) fakeWin.fire();            // straight back to running
+        await buildEngine(iosMode);
+        if (keepUnlocked) fakeWin.fire();
     }
 
-    function resetCounters() {
-        cPlayed = 0;
-        cQueued = 0;
-        cCollapsed = 0;
-        cDropped = 0;
-        levels.fill(0);
-        peaks.fill(0);
-    }
-
-    // ---------------------------------------------------------------------------
-    // Signal bindings. Every readable on the engine is a lite-signal signal, so the
-    // whole HUD is effects - no polling, no manual invalidation.
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
+    // Signal bindings: the HUD is effects, not polling.
+    // ==========================================================================
 
     function bindSignals() {
         effects.push(effect(() => {
             const state = engine.ctxState()();
             $bState.textContent = state;
-            $fsmCtxNow.textContent = state;
-            for (const node of $ctxNodes) {
-                const match = node.dataset.ctx === state;
-                node.classList.toggle('active', match && state !== 'interrupted' && state !== 'closed');
-                node.classList.toggle('warn', match && (state === 'interrupted' || state === 'closed'));
-            }
+            paintFsm();
             logPush('state', 'ctxState -> ' + state);
+            uPush('state', 'ctxState -> ' + state);
         }));
 
         effects.push(effect(() => {
@@ -1782,7 +1767,9 @@
             $bUnlocked.classList.toggle('on', on);
             $lockState.textContent = on ? 'unlocked' : 'locked';
             $bGesture.disabled = on;
+            $xfHint.textContent = on ? 'unlocked' : 'unlock on scene 4 first';
             logPush('state', 'unlocked -> ' + on);
+            uPush('state', 'unlocked -> ' + on);
         }));
 
         effects.push(effect(() => {
@@ -1800,94 +1787,29 @@
                 const strip = stripByBus.get(name);
                 if (strip) {
                     strip.out.textContent = m ? 'muted' : v.toFixed(2);
+                    strip.slider.value = String(Math.round(v * 100));
                     strip.mute.classList.toggle('on', m);
                     strip.mute.setAttribute('aria-pressed', m ? 'true' : 'false');
                 }
-                logPush('bus', name + ' -> ' + (m ? 'muted' : 'vol ' + v.toFixed(2)));
             }));
         }
     }
 
-    function bindLoadSignals() {
-        for (const id of allSoundIds()) {
-            const sig = engine.loadState(id);
-            if (!sig) continue;
+    function bindTrackSignals() {
+        for (const id of TRACK_IDS) {
+            const load = engine.trackLoadState(id);
+            const playing = engine.trackPlaying(id);
+            if (!load || !playing) continue;
             effects.push(effect(() => {
-                const state = sig();
-                const row = soundRows.get(id);
-                if (row) {
-                    row.st.className = 'st ' + state;
-                    row.st.textContent = state.toUpperCase();
-                }
-                if (id === selected) paintLoadFsm(state);
-                logPush('load', id + ' -> ' + state);
-                updateReadyCount();
+                const on = playing();
+                logPush(on ? 'play' : 'stop', 'track ' + id + (on ? ' playing' : ' stopped'));
             }));
         }
     }
 
-    function allSoundIds() {
-        const ids = SOUNDS.map((s) => s[0]);
-        ids.push(BROKEN_ID);
-        return ids;
-    }
-
-    function updateReadyCount() {
-        let n = 0, total = 0;
-        for (const id of allSoundIds()) {
-            total++;
-            const sig = engine.loadState(id);
-            if (sig && sig.peek() === 'ready') n++;
-        }
-        $eReady.textContent = n + ' / ' + total;
-    }
-
-    function paintLoadFsm(state) {
-        $fsmLoadNow.textContent = selected + ': ' + state;
-        for (const node of $loadNodes) {
-            const match = node.dataset.load === state;
-            node.classList.toggle('active', match && state !== 'error');
-            node.classList.toggle('warn', match && state === 'error');
-        }
-    }
-
-    // ---------------------------------------------------------------------------
-    // Rows: sounds, mixer strips
-    // ---------------------------------------------------------------------------
-
-    const soundRows = new Map();
-
-    function buildSoundRows() {
-        $sounds.textContent = '';
-        soundRows.clear();
-        for (const id of allSoundIds()) {
-            const bus = id === BROKEN_ID ? 'sfx' : SOUNDS.find((s) => s[0] === id)[1];
-            const row = document.createElement('div');
-            row.className = 'trow' + (id === selected ? ' sel' : '');
-            row.dataset.sound = id;
-
-            const name = document.createElement('code');
-            name.textContent = id;
-            const busEl = document.createElement('span');
-            busEl.className = 'meta';
-            busEl.textContent = bus;
-            const src = document.createElement('span');
-            src.className = 'meta';
-            src.textContent = id === BROKEN_ID
-                ? 'unreachable / injected 404'
-                : 'blob: wav ' + durById.get(id).toFixed(2) + 's';
-            const st = document.createElement('span');
-            st.className = 'st idle';
-            st.textContent = 'IDLE';
-            const play = document.createElement('button');
-            play.textContent = 'play';
-            play.dataset.play = id;
-
-            row.append(name, busEl, src, st, play);
-            $sounds.appendChild(row);
-            soundRows.set(id, {row, st});
-        }
-    }
+    // ==========================================================================
+    // Mixer strips
+    // ==========================================================================
 
     const stripByBus = new Map();
 
@@ -1906,7 +1828,6 @@
             slider.type = 'range';
             slider.min = '0';
             slider.max = '100';
-            // Initial position comes from the signal, not from a number typed in markup.
             slider.value = String(Math.round(engine.busVolume(name).peek() * 100));
             slider.setAttribute('aria-label', name + ' volume');
             slider.addEventListener('input', () => {
@@ -1928,41 +1849,16 @@
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Play paths
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
+    // Play paths + handle table
+    // ==========================================================================
 
-    /**
-     * Wraps engine.play() so the demo can name what happened to a call that came back
-     * -1. The engine returns the same -1 for "queued", "collapsed onto an existing
-     * queue entry", and "dropped, queue full" - so the demo watches the queue map to
-     * tell them apart. A public queue readable would remove the need for this.
-     */
-    function firePlay(id, volume, pan, pitch) {
+    function fire(id, volume, pan, pitch) {
         if (!engine) return -1;
-        const q = engine._pendingPlays;
-        const had = q.has(id);
-        const before = q.size;
-
         const h = engine.play(id, volume, pan, pitch);
-
-        if (h >= 0) {
-            cPlayed++;
-            pushHandle(h, id, pitch);
-            logPush('play', id + ' -> ' + engine.busOf(h) + ' ch ' + ((h >>> 0) & 0xFF));
-            return h;
-        }
-        if (had) {
-            cCollapsed++;
-            logPush('queue', id + ' collapsed onto its queued intent');
-        } else if (q.size === before) {
-            cDropped++;
-            logPush('drop', id + ' dropped: queue at limit ' + QUEUE_LIMIT);
-        } else {
-            cQueued++;
-            logPush('queue', id + ' queued, waiting on gesture or decode');
-        }
-        return -1;
+        fireCount++;
+        if (h >= 0) pushHandle(h, id, pitch);
+        return h;
     }
 
     function pushHandle(h, id, pitch) {
@@ -1975,23 +1871,26 @@
         }
         hHandle[0] = h;
         hStatus[0] = H_LIVE;
-        // When this voice would have finished on its own. If isPlaying() goes false
-        // before then, the channel was taken from under it: stolen, not ended.
-        hEnd[0] = ctx.currentTime + 0.025 + (durById.get(id) || 0) / (pitch || 1);
+        hEnd[0] = ctx.currentTime + 0.02 + (durById.get(id) || 0) / (pitch || 1);
         hBus[0] = engine.busOf(h);
         hSound[0] = id;
         if (hCount < HANDLE_ROWS) hCount++;
-        renderHandles();
+        handlesDirty = 1;
     }
-
-    // ---------------------------------------------------------------------------
-    // Handle table
-    // ---------------------------------------------------------------------------
 
     function hex32(v) {
         let s = (v >>> 0).toString(16).toUpperCase();
         while (s.length < 8) s = '0' + s;
         return '0x' + s;
+    }
+
+    // Low 32 bits are the pool handle: [gen:24][channel:8].
+    function genOf(h) {
+        return (h >>> 0) >>> 8;
+    }
+
+    function chanOf(h) {
+        return (h >>> 0) & 0xFF;
     }
 
     function settle(i) {
@@ -2001,15 +1900,24 @@
         return true;
     }
 
+    function refreshHandleStatuses() {
+        let dirty = false;
+        for (let i = 0; i < hCount; i++) if (settle(i)) dirty = true;
+        if (dirty || handlesDirty) {
+            handlesDirty = 0;
+            renderHandles();
+        }
+    }
+
     function renderHandles() {
         $hEmpty.hidden = hCount > 0;
         $handles.textContent = '';
         for (let i = 0; i < hCount; i++) {
             const h = hHandle[i];
-            settle(i);
+            const stale = hStatus[i] !== H_LIVE;
 
             const row = document.createElement('div');
-            row.className = 'trow';
+            row.className = 'trow' + (stale ? ' stale' : '');
 
             const bus = document.createElement('span');
             bus.className = 'meta';
@@ -2020,7 +1928,7 @@
 
             const meta = document.createElement('span');
             meta.className = 'meta';
-            meta.textContent = hSound[i] + ' / ch ' + ((h >>> 0) & 0xFF);
+            meta.textContent = hSound[i] + ' / ch ' + chanOf(h) + ' / gen ' + genOf(h);
 
             const st = document.createElement('span');
             st.className = H_CLASS[hStatus[i]];
@@ -2032,10 +1940,13 @@
             stop.addEventListener('click', () => {
                 const live = engine.isPlaying(hHandle[idx]);
                 engine.stop(hHandle[idx]);
-                hStatus[idx] = live ? H_STOPPED : hStatus[idx];
-                logPush('stop', live
-                    ? 'stopped ' + hSound[idx] + ' on ' + hBus[idx]
-                    : 'stale handle, no-op (' + hBus[idx] + ')');
+                if (live) {
+                    hStatus[idx] = H_STOPPED;
+                    logPush('stop', 'stop(' + hex32(hHandle[idx]) + ') on ' + hBus[idx]);
+                } else {
+                    logPush('stop', 'stale handle -> stop() no-op (' + hBus[idx] + ' gen ' + genOf(hHandle[idx]) + ')');
+                }
+                handlesDirty = 1;
                 renderHandles();
             });
 
@@ -2044,32 +1955,18 @@
         }
     }
 
-    function refreshHandleStatuses() {
-        let dirty = false;
-        for (let i = 0; i < hCount; i++) if (settle(i)) dirty = true;
-        if (dirty) renderHandles();
+    // ==========================================================================
+    // Sampling (per-frame, zero-alloc)
+    // ==========================================================================
+
+    function sampleDuck() {
+        const rec = engine._buses.get('music');
+        const g = rec && rec.duckGain ? rec.duckGain.gain.value : 1;
+        duckTrace[duckHead & TRACE_MASK] = g;
+        duckHead = (duckHead + 1) | 0;
     }
 
-    // ---------------------------------------------------------------------------
-    // Drawing
-    // ---------------------------------------------------------------------------
-
-    function sampleTraces() {
-        if (!engine) return;
-        for (let i = 0; i < BUSES.length; i++) {
-            const node = engine.busNode(BUSES[i]);
-            traces[i][traceHead & TRACE_MASK] = node ? node.gain.value : 0;
-        }
-        const master = engine.masterNode();
-        traces[BUSES.length][traceHead & TRACE_MASK] = master ? master.gain.value : 0;
-        traceHead = (traceHead + 1) | 0;
-    }
-
-    // xfadeGain lives inside the private track record: the engine exposes trackPlaying
-    // and trackPosition, not the graph. Reading it is demo-only introspection - a game
-    // never needs it, but a demo that claims "equal power" owes you the gains.
     function sampleXfade() {
-        if (!engine) return;
         let sum = 0;
         for (let i = 0; i < TRACK_IDS.length; i++) {
             const rec = engine._tracks.get(TRACK_IDS[i]);
@@ -2081,14 +1978,179 @@
         xfHead = (xfHead + 1) | 0;
     }
 
+    // ==========================================================================
+    // Drawing
+    // ==========================================================================
+
+    function drawGrid() {
+        const c = cvGrid.c, w = cvGrid.w, h = cvGrid.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+        const now = ctx.currentTime;
+        const rows = BUSES.length;
+        const rh = h / rows;
+        c.textBaseline = 'top';
+
+        for (let b = 0; b < rows; b++) {
+            const pool = engine._buses.get(BUSES[b])?.pool;
+            const y0 = b * rh + 4;
+            const cellH = rh - 26;
+            c.font = FONT_M;
+            c.fillStyle = C_DIM;
+            c.fillText(BUSES[b], 4, y0 + cellH + 4);
+
+            if (!pool) continue;
+            const cap = pool.capacity;
+            const pad = 4;
+            const cw = (w - pad) / cap - pad;
+            c.font = FONT_S;
+            for (let i = 0; i < cap; i++) {
+                const x = pad + i * (cw + pad);
+                const live = pool.expireTimes[i] > now;
+                c.fillStyle = live ? C_PHOS_12 : 'rgba(255,255,255,0.015)';
+                c.fillRect(x, y0, cw, cellH);
+
+                if (live) {
+                    const remain = pool.expireTimes[i] - now;
+                    const frac = Math.max(0, Math.min(1, remain / 0.6));
+                    c.fillStyle = BUS_COLOR[b];
+                    c.globalAlpha = 0.35;
+                    c.fillRect(x, y0 + cellH * (1 - frac), cw, cellH * frac);
+                    c.globalAlpha = 1;
+                }
+
+                c.strokeStyle = live ? BUS_COLOR[b] : C_GRID;
+                c.lineWidth = 1;
+                c.strokeRect(x + 0.5, y0 + 0.5, cw - 1, cellH - 1);
+
+                c.fillStyle = live ? C_INK : C_DIM;
+                c.fillText(String(i), x + 3, y0 + 3);
+                c.fillStyle = C_DIM;
+                c.fillText('g' + pool.generations[i], x + 3, y0 + cellH - 11);
+            }
+        }
+        c.textBaseline = 'alphabetic';
+    }
+
+    function drawVScope() {
+        const c = cvVScope.c, w = cvVScope.w, h = cvVScope.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+        if (!scopeAnalyser) return;
+
+        c.strokeStyle = C_GRID;
+        c.lineWidth = 1;
+        const mid = Math.round(h / 2) + 0.5;
+        c.beginPath();
+        c.moveTo(0, mid);
+        c.lineTo(w, mid);
+        c.stroke();
+
+        scopeAnalyser.getFloatTimeDomainData(scopeBuf);
+        const step = w / SCOPE_N;
+        const amp = h * 0.44;
+        c.beginPath();
+        for (let i = 0; i < SCOPE_N; i++) {
+            const x = i * step;
+            const y = mid - scopeBuf[i] * amp;
+            if (i === 0) c.moveTo(x, y);
+            else c.lineTo(x, y);
+        }
+        c.strokeStyle = C_PHOS;
+        c.lineWidth = 1.25;
+        c.stroke();
+    }
+
+    function drawDuck() {
+        const c = cvDuck.c, w = cvDuck.w, h = cvDuck.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+        const top = 12, bot = h - 6, span = bot - top;
+
+        c.strokeStyle = C_GRID;
+        c.lineWidth = 1;
+        c.beginPath();
+        for (let i = 0; i <= 4; i++) {
+            const y = Math.round(top + span * i / 4) + 0.5;
+            c.moveTo(0, y);
+            c.lineTo(w, y);
+        }
+        c.stroke();
+        c.font = FONT_M;
+        c.fillStyle = C_DIM;
+        c.fillText('1.0 rest', 4, top + 9);
+        c.fillText('0.0', 4, bot - 2);
+
+        // Segment-color by slope: falling (attack/dip) cyan, rising (release) amber.
+        const step = w / TRACE_CAP;
+        let prevV = duckTrace[xfHeadSafe(duckHead)];
+        for (let k = 1; k < TRACE_CAP; k++) {
+            const idx = (duckHead + k) & TRACE_MASK;
+            const v = duckTrace[idx];
+            const x0 = (k - 1) * step;
+            const x1 = k * step;
+            const y0 = bot - prevV * span;
+            const y1 = bot - v * span;
+            c.strokeStyle = v < prevV - 0.0005 ? C_CYAN : (v > prevV + 0.0005 ? C_AMBER : C_DIM);
+            c.lineWidth = 1.5;
+            c.beginPath();
+            c.moveTo(x0, y0);
+            c.lineTo(x1, y1);
+            c.stroke();
+            prevV = v;
+        }
+
+        c.fillStyle = C_CYAN;
+        c.fillText('attack 0.05s', 60, top + 9);
+        c.fillStyle = C_AMBER;
+        c.fillText('release 0.30s', 140, top + 9);
+    }
+
+    function xfHeadSafe(head) {
+        return head & TRACE_MASK;
+    }
+
+    function drawVu() {
+        const c = cvVu.c, w = cvVu.w, h = cvVu.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+        const rows = BUSES.length;
+        const rh = h / rows;
+        c.font = FONT_M;
+
+        for (let i = 0; i < rows; i++) {
+            const sig = engine.level(BUSES[i]);
+            const rms = sig ? sig.peek() : 0;
+            vuLevel[i] = rms > vuLevel[i] ? rms : vuLevel[i] + (rms - vuLevel[i]) * 0.2;
+            vuPeak[i] = vuLevel[i] > vuPeak[i] ? vuLevel[i] : vuPeak[i] - 0.006;
+
+            const y = i * rh + 4;
+            const bh = rh - 10;
+            c.fillStyle = C_DIM;
+            c.fillText(BUSES[i], 6, y + bh * 0.5 + 4);
+
+            const x0 = 52;
+            const bw = w - x0 - 10;
+            c.fillStyle = 'rgba(255,255,255,0.03)';
+            c.fillRect(x0, y, bw, bh);
+
+            const v = Math.min(1, vuLevel[i] * 2.6);
+            c.fillStyle = BUS_COLOR[i];
+            c.fillRect(x0, y, bw * v, bh);
+
+            const p = Math.min(1, vuPeak[i] * 2.6);
+            if (p > 0.01) {
+                c.fillStyle = C_INK;
+                c.fillRect(x0 + bw * p - 1, y, 2, bh);
+            }
+        }
+    }
+
     function drawXfade() {
         const c = cvXfade.c, w = cvXfade.w, h = cvXfade.h;
         c.fillStyle = C_CLEAR;
         c.fillRect(0, 0, w, h);
-
-        const top = 14;
-        const bot = h - 6;
-        const span = bot - top;
+        const top = 14, bot = h - 6, span = bot - top;
 
         c.strokeStyle = C_GRID;
         c.lineWidth = 1;
@@ -2100,7 +2162,6 @@
         }
         c.stroke();
 
-        // Where a linear crossfade's combined power would sag.
         const ySag = Math.round(bot - 0.7071 * span) + 0.5;
         c.strokeStyle = C_AMBER;
         c.globalAlpha = 0.4;
@@ -2152,225 +2213,104 @@
         c.fillText('combined power', lx, 10);
     }
 
-    function drawTracks() {
-        const c = cvTracks.c, w = cvTracks.w, h = cvTracks.h;
+    function drawRings() {
+        const c = cvRings.c, w = cvRings.w, h = cvRings.h;
         c.fillStyle = C_CLEAR;
         c.fillRect(0, 0, w, h);
-        if (!engine) return;
 
-        const rows = TRACK_IDS.length;
-        const rh = h / rows;
+        const rings = TRACK_IDS.length;
+        const cellW = w / rings;
+        const R = Math.min(cellW, h) * 0.30;
+        c.textBaseline = 'middle';
+        c.textAlign = 'center';
         c.font = FONT_M;
-        c.textBaseline = 'top';
 
-        for (let i = 0; i < rows; i++) {
+        for (let i = 0; i < rings; i++) {
             const id = TRACK_IDS[i];
-            const playingSig = engine.trackPlaying(id);
             const posSig = engine.trackPosition(id);
             const durSig = engine.trackDuration(id);
-            if (!playingSig || !posSig || !durSig) continue;
+            const playSig = engine.trackPlaying(id);
+            const pos = posSig ? posSig.peek() : 0;
+            const dur = (durSig ? durSig.peek() : 0) || durById.get(id) || 1;
+            const on = playSig ? playSig.peek() : false;
+            const cx = cellW * (i + 0.5);
+            const cy = h * 0.42;
+            const frac = Math.max(0, Math.min(1, pos / dur));
 
-            const on = playingSig.peek();
-            const pos = posSig.peek();
-            const dur = durSig.peek() || durById.get(id) || 1;
-            const y0 = i * rh + 8;
-            const barY = y0 + 18;
-            const barH = 14;
-            const x0 = 8;
-            const bw = w - 16;
+            c.beginPath();
+            c.arc(cx, cy, R, 0, Math.PI * 2);
+            c.strokeStyle = C_GRID;
+            c.lineWidth = 5;
+            c.stroke();
 
-            c.fillStyle = on ? TRACK_COLOR[i] : C_DIM;
-            c.fillText(id, x0, y0);
-            c.fillStyle = C_DIM;
-            c.fillText(posText[i], x0 + 56, y0);
-            c.fillText(on ? 'playing' : 'stopped', w - 62, y0);
-
-            c.fillStyle = 'rgba(255,255,255,0.03)';
-            c.fillRect(x0, barY, bw, barH);
-
-            const opts = TRACKS[i][3];
-            if (opts.loopEnd != null) {
-                const lx = x0 + (opts.loopStart / dur) * bw;
-                const lw = ((opts.loopEnd - opts.loopStart) / dur) * bw;
-                c.fillStyle = C_PHOS_12;
-                c.fillRect(lx, barY, lw, barH);
-                c.strokeStyle = C_AMBER;
-                c.lineWidth = 1;
+            if (on || frac > 0) {
                 c.beginPath();
-                c.moveTo(Math.round(lx) + 0.5, barY);
-                c.lineTo(Math.round(lx) + 0.5, barY + barH);
-                c.moveTo(Math.round(lx + lw) + 0.5, barY);
-                c.lineTo(Math.round(lx + lw) + 0.5, barY + barH);
+                c.arc(cx, cy, R, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+                c.strokeStyle = TRACK_COLOR[i];
+                c.lineWidth = 5;
                 c.stroke();
             }
 
-            const px = x0 + Math.min(1, pos / dur) * bw;
             c.fillStyle = on ? TRACK_COLOR[i] : C_DIM;
-            c.globalAlpha = 0.45;
-            c.fillRect(x0, barY, px - x0, barH);
-            c.globalAlpha = 1;
-            c.fillStyle = C_INK;
-            c.fillRect(px - 1, barY - 2, 2, barH + 4);
-
-            c.strokeStyle = C_GRID;
-            c.lineWidth = 1;
-            c.strokeRect(x0 + 0.5, barY + 0.5, bw - 1, barH - 1);
+            c.fillText(id, cx, cy);
+            c.fillStyle = C_DIM;
+            c.fillText(posText[i], cx, cy + R + 14);
+            c.fillText(on ? 'playing' : 'stopped', cx, cy - R - 12);
         }
         c.textBaseline = 'alphabetic';
+        c.textAlign = 'left';
     }
 
-    function drawGainScope() {
-        const c = cvGain.c, w = cvGain.w, h = cvGain.h;
-        c.fillStyle = C_CLEAR;
-        c.fillRect(0, 0, w, h);
+    // ==========================================================================
+    // Unlock theater: FSM paint + scripted interruption
+    // ==========================================================================
 
-        c.strokeStyle = C_GRID;
-        c.lineWidth = 1;
-        c.beginPath();
-        for (let i = 1; i < 4; i++) {
-            const y = Math.round(h * i / 4) + 0.5;
-            c.moveTo(0, y);
-            c.lineTo(w, y);
-        }
-        c.stroke();
+    let simState = null;   // non-null while the scripted iOS walk is running
+    let simUntil = 0;
 
-        c.font = FONT_M;
-        c.fillStyle = C_DIM;
-        c.fillText('1.0', 4, 11);
-        c.fillText('0.0', 4, h - 4);
-
-        const step = w / TRACE_CAP;
-        for (let t = 0; t <= BUSES.length; t++) {
-            const ring = traces[t];
-            c.beginPath();
-            for (let k = 0; k < TRACE_CAP; k++) {
-                const idx = (traceHead + k) & TRACE_MASK;
-                const v = ring[idx];
-                const x = k * step;
-                const y = h - 4 - v * (h - 14);
-                if (k === 0) c.moveTo(x, y);
-                else c.lineTo(x, y);
-            }
-            const master = t === BUSES.length;
-            c.strokeStyle = master ? C_INK : BUS_COLOR[t];
-            c.lineWidth = master ? 1.75 : 1.25;
-            c.setLineDash(master ? [4, 3] : []);
-            c.stroke();
-        }
-        c.setLineDash([]);
-
-        let lx = 40;
-        for (let t = 0; t <= BUSES.length; t++) {
-            const label = t === BUSES.length ? 'master' : BUSES[t];
-            c.fillStyle = t === BUSES.length ? C_INK : BUS_COLOR[t];
-            c.fillText(label, lx, 11);
-            lx += label.length * 6 + 14;
-        }
-    }
-
-    function drawMeters() {
-        const c = cvMeters.c, w = cvMeters.w, h = cvMeters.h;
-        c.fillStyle = C_CLEAR;
-        c.fillRect(0, 0, w, h);
-        if (!analysers) return;
-
-        const rows = BUSES.length;
-        const rh = h / rows;
-        c.font = FONT_M;
-
-        for (let i = 0; i < rows; i++) {
-            analysers[i].getByteTimeDomainData(meterBuf);
-            let acc = 0;
-            for (let k = 0; k < meterBuf.length; k++) {
-                const v = (meterBuf[k] - 128) / 128;
-                acc += v * v;
-            }
-            const rms = Math.sqrt(acc / meterBuf.length);
-            levels[i] = rms > levels[i] ? rms : levels[i] + (rms - levels[i]) * 0.15;
-            peaks[i] = levels[i] > peaks[i] ? levels[i] : peaks[i] - 0.006;
-
-            const y = i * rh + 4;
-            const bh = rh - 10;
-            c.fillStyle = C_DIM;
-            c.fillText(BUSES[i], 6, y + bh * 0.5 + 4);
-
-            const x0 = 52;
-            const bw = w - x0 - 10;
-            c.fillStyle = 'rgba(255,255,255,0.03)';
-            c.fillRect(x0, y, bw, bh);
-
-            const v = Math.min(1, levels[i] * 2.2);
-            c.fillStyle = BUS_COLOR[i];
-            c.fillRect(x0, y, bw * v, bh);
-
-            const p = Math.min(1, peaks[i] * 2.2);
-            if (p > 0.01) {
-                c.fillStyle = C_INK;
-                c.fillRect(x0 + bw * p - 1, y, 2, bh);
-            }
-        }
-    }
-
-    function drawMatrix() {
-        const c = cvMatrix.c, w = cvMatrix.w, h = cvMatrix.h;
-        c.fillStyle = C_CLEAR;
-        c.fillRect(0, 0, w, h);
+    function paintFsm() {
         if (!engine) return;
-
-        const now = ctx.currentTime;
-        const rows = BUSES.length;
-        const rh = h / rows;
-        c.font = FONT_S;
-        c.textBaseline = 'top';
-
-        for (let b = 0; b < rows; b++) {
-            // Pool state is not public: the engine exposes activeCount(), not the
-            // channel array. Reading it here is demo-only introspection.
-            const pool = engine._buses.get(BUSES[b])?.pool;
-            const y0 = b * rh + 2;
-            const cellH = rh - 20;
-
-            c.fillStyle = C_DIM;
-            c.font = FONT_M;
-            c.fillText(BUSES[b], 4, y0 + cellH + 3);
-
-            if (!pool) continue;
-            const cap = pool.capacity;
-            const pad = 3;
-            const cw = (w - pad) / cap - pad;
-
-            c.font = FONT_S;
-            for (let i = 0; i < cap; i++) {
-                const x = pad + i * (cw + pad);
-                const live = pool.expireTimes[i] > now;
-                c.fillStyle = live ? C_PHOS_12 : 'rgba(255,255,255,0.015)';
-                c.fillRect(x, y0, cw, cellH);
-
-                if (live) {
-                    const remain = pool.expireTimes[i] - now;
-                    const frac = Math.max(0, Math.min(1, remain / 1.2));
-                    c.fillStyle = BUS_COLOR[b];
-                    c.globalAlpha = 0.35;
-                    c.fillRect(x, y0 + cellH * (1 - frac), cw, cellH * frac);
-                    c.globalAlpha = 1;
-                }
-
-                c.strokeStyle = live ? BUS_COLOR[b] : C_GRID;
-                c.lineWidth = 1;
-                c.strokeRect(x + 0.5, y0 + 0.5, cw - 1, cellH - 1);
-
-                c.fillStyle = live ? C_INK : C_DIM;
-                c.fillText(String(i), x + 3, y0 + 3);
-                c.fillStyle = C_DIM;
-                c.fillText('g' + pool.generations[i], x + 3, y0 + cellH - 12);
-            }
+        const state = simState || (engine.isAutoSuspended() ? 'dormant' : engine.ctxState().peek());
+        $fsmNow.textContent = state;
+        for (const node of $fsmNodes) {
+            const key = node.dataset.node;
+            const match = key === state;
+            node.classList.toggle('active', match && state === 'running');
+            node.classList.toggle('dormant', match && state === 'dormant');
+            node.classList.toggle('warn', match && (state === 'interrupted' || state === 'suspended'));
         }
-        c.textBaseline = 'alphabetic';
+        $eUnlock.classList.toggle('lit', state === 'running' || state === 'dormant' || state === 'interrupted');
+        $eDorm.classList.toggle('lit', state === 'dormant');
+        $eWake.classList.toggle('lit', state === 'dormant');
+        $eInt.classList.toggle('lit', state === 'interrupted');
+        $eIntback.classList.toggle('lit', state === 'interrupted');
     }
 
-    // ---------------------------------------------------------------------------
-    // Frame loop
-    // ---------------------------------------------------------------------------
+    // A desktop context will not enter 'interrupted' (an iOS OS state), so the demo
+    // scripts the visual walk: running -> interrupted -> running. The real signals
+    // are untouched; this only drives the diagram + log.
+    function simulateInterruption() {
+        if (!engine.unlocked().peek()) {
+            uPush('drop', 'unlock first: nothing to interrupt while locked');
+            return;
+        }
+        simState = 'interrupted';
+        simUntil = ctx.currentTime + 2.0;
+        uPush('state', 'iOS: phone call -> interrupted (mocked)');
+        paintFsm();
+    }
+
+    function tickSim() {
+        if (simState && ctx.currentTime >= simUntil) {
+            simState = null;
+            uPush('state', 'iOS: call ended -> resume() -> running (mocked)');
+            paintFsm();
+        }
+    }
+
+    // ==========================================================================
+    // Frame loop (allocates nothing)
+    // ==========================================================================
 
     function frame() {
         frameCount = (frameCount + 1) | 0;
@@ -2380,178 +2320,180 @@
         }
 
         if (engine) {
-            sampleTraces();
-            sampleXfade();
-            if (scene === 2) {
-                drawGainScope();
-                drawMeters();
-            } else if (scene === 3) drawMatrix();
-            else if (scene === 4) {
+            if (scene === 1) sampleDuck();
+            if (scene === 2) sampleXfade();
+
+            if (scene === 0) {
+                drawGrid();
+                drawVScope();
+            } else if (scene === 1) {
+                drawDuck();
+                drawVu();
+            } else if (scene === 2) {
                 drawXfade();
-                drawTracks();
+                drawRings();
             }
 
             if ((frameCount & TELEM_MASK) === 0) {
-                const total = engine.activeCount();
-                $bVoices.textContent = total;
-                $vActive.textContent = total + ' voices';
-                if (scene === 0) renderQueue();
-                if (scene === 3) refreshHandleStatuses();
-                if (scene === 4) updateMusicTelemetry();
-                if (logDirty) {
-                    logDirty = 0;
-                    renderLog();
-                }
+                throttledTelemetry();
             }
+            if (scene === 3) tickSim();
         }
         requestAnimationFrame(frame);
     }
 
-    function renderQueue() {
-        const q = engine._pendingPlays;
-        $qSize.textContent = q.size + ' / ' + QUEUE_LIMIT;
-        $qEmpty.hidden = q.size > 0;
-        $queue.textContent = '';
-        for (const [id, args] of q) {
-            const row = document.createElement('div');
-            row.className = 'trow';
-            const name = document.createElement('code');
-            name.textContent = id;
-            const meta = document.createElement('span');
-            meta.className = 'meta';
-            meta.textContent = 'vol ' + args[1].toFixed(2) + ' / pan ' + args[2].toFixed(2) + ' / pitch ' + args[3].toFixed(2);
-            row.append(name, meta);
-            $queue.appendChild(row);
+    function throttledTelemetry() {
+        const total = engine.activeCount();
+        $bVoices.textContent = total;
+        $vgActive.textContent = total + ' voices';
+        $eActive.textContent = total;
+
+        // voices/s over the wall time since the last throttle pass.
+        const nowMs = ctx.currentTime;
+        if (lastRateAt === 0) lastRateAt = nowMs;
+        const dt = nowMs - lastRateAt;
+        if (dt >= 0.5) {
+            voicesPerSec = Math.round((fireCount - lastRateCount) / dt);
+            lastRateCount = fireCount;
+            lastRateAt = nowMs;
         }
-        $cPlayed.textContent = cPlayed;
-        $cQueued.textContent = cQueued;
-        $cCollapsed.textContent = cCollapsed;
-        $cDropped.textContent = cDropped;
-        $cDropped.className = cDropped > 0 ? 'warn' : '';
+        if (scene === 0) {
+            $vgRate.textContent = voicesPerSec + ' v/s';
+            refreshHandleStatuses();
+        }
+
+        if (scene === 1) {
+            const rec = engine._buses.get('music');
+            const g = rec ? rec.duckGain.gain.value : 1;
+            $bdDuck.textContent = (g > 0.98 ? 'rest ' : 'ducked ') + g.toFixed(2);
+        }
+
+        if (scene === 2) {
+            for (let i = 0; i < TRACK_IDS.length; i++) {
+                const id = TRACK_IDS[i];
+                const posSig = engine.trackPosition(id);
+                const durSig = engine.trackDuration(id);
+                const pos = posSig ? posSig.peek() : 0;
+                const dur = (durSig ? durSig.peek() : 0) || durById.get(id) || 0;
+                posText[i] = pos.toFixed(1) + ' / ' + dur.toFixed(1) + 's';
+            }
+            $xfPower.textContent = 'power ' + xfPower[(xfHead - 1) & TRACE_MASK].toFixed(2);
+        }
+
+        if (scene === 3) paintFsm();
+
+        // Heap readout (Chrome). Reused string, no object churn.
+        const mem = performance.memory;
+        if (mem) {
+            $bHeap.textContent = (mem.usedJSHeapSize / 1048576).toFixed(1) + ' MB';
+        } else {
+            $bHeap.textContent = 'n/a';
+        }
+
+        if (mainLog.dirty) {
+            mainLog.dirty = 0;
+            renderLog(mainLog);
+        }
+        if (uLog.dirty) {
+            uLog.dirty = 0;
+            renderLog(uLog);
+        }
     }
 
-    function updateMusicTelemetry() {
-        $musicHint.textContent = engine.unlocked().peek() ? 'unlocked' : 'unlock on scene 1 first';
-        for (let i = 0; i < TRACK_IDS.length; i++) {
-            const id = TRACK_IDS[i];
-            const posSig = engine.trackPosition(id);
-            const durSig = engine.trackDuration(id);
-            const pos = posSig ? posSig.peek() : 0;
-            const dur = (durSig ? durSig.peek() : 0) || durById.get(id) || 0;
-            posText[i] = pos.toFixed(1) + ' / ' + dur.toFixed(1) + 's';
-        }
-        $powerNow.textContent = 'power ' + xfPower[(xfHead - 1) & TRACE_MASK].toFixed(2);
-    }
-
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
     // Input
-    // ---------------------------------------------------------------------------
+    // ==========================================================================
+
+    function selectScene(n) {
+        scene = n | 0;
+        for (let i = 0; i < $tabBtns.length; i++) {
+            const on = i === scene;
+            $tabBtns[i].classList.toggle('on', on);
+            $tabBtns[i].setAttribute('aria-pressed', on ? 'true' : 'false');
+            $decks[i].hidden = !on;
+        }
+        needResize = 1;
+    }
 
     $tabBtns.forEach((b) => {
-        b.addEventListener('click', () => {
-            scene = b.dataset.scene | 0;
-            for (let i = 0; i < $tabBtns.length; i++) {
-                const on = i === scene;
-                $tabBtns[i].classList.toggle('on', on);
-                $tabBtns[i].setAttribute('aria-pressed', on ? 'true' : 'false');
-                $decks[i].hidden = !on;
-            }
-            needResize = 1;
-        });
+        b.addEventListener('click', () => selectScene(b.dataset.scene | 0));
     });
 
-    document.querySelectorAll('[data-qplay]').forEach((b) => {
-        b.addEventListener('click', () => firePlay(b.dataset.qplay, 0.9, 0, 1));
-    });
+    // ---- scene 1: strafe the grid ----
+    let strafing = false;
+    let strafeIdx = 0;
 
-    $bSpam.addEventListener('click', () => {
-        for (let i = 0; i < 5; i++) firePlay('laser', 0.9, (i - 2) * 0.4, 1 + i * 0.05);
-    });
-
-    $bFlood.addEventListener('click', () => {
-        const ids = ['laser', 'hit', 'coin', 'click', 'blip', 'pad'];
-        for (const id of ids) firePlay(id, 0.8, 0, 1);
-    });
-
-    $bGesture.addEventListener('click', () => {
-        logPush('state', 'dispatching synthetic first gesture');
-        fakeWin.fire();
-    });
-
-    $bRelock.addEventListener('click', async () => {
-        $bRelock.disabled = true;
-        await rebuild(false);                        // the whole point: boot locked again
-        $bRelock.disabled = false;
-    });
-
-    $sounds.addEventListener('click', (e) => {
-        const play = e.target.closest('button[data-play]');
-        if (play) {
-            firePlay(play.dataset.play, 0.9, 0, 1);
-            return;
+    function strafeAt(clientX, clientY) {
+        const r = cvGrid.el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) return;      // no layout yet: never feed NaN to play()
+        const rx = Math.max(0, Math.min(1, (clientX - r.left) / r.width));  // 0..1 across
+        const ry = (clientY - r.top) / r.height;      // 0..1 down: top rows = music/sfx
+        const pan = rx * 2 - 1;                        // clamped rx keeps pan in [-1, 1]
+        const pitch = 0.85 + rx * 0.5;
+        // Bottom third fires ui, the rest fires sfx - so both pools get exercised.
+        if (ry > 0.66) {
+            fire(STRAFE_UI[strafeIdx % STRAFE_UI.length], 0.8, pan, pitch);
+        } else {
+            fire(STRAFE_SFX[strafeIdx % STRAFE_SFX.length], 0.8, pan, pitch);
         }
-        const row = e.target.closest('[data-sound]');
-        if (!row) return;
-        selected = row.dataset.sound;
-        for (const [id, rec] of soundRows) rec.row.classList.toggle('sel', id === selected);
-        const sig = engine.loadState(selected);
-        paintLoadFsm(sig ? sig.peek() : 'idle');
+        strafeIdx++;
+    }
+
+    cvGrid.el.addEventListener('pointerdown', (e) => {
+        strafing = true;
+        cvGrid.el.setPointerCapture(e.pointerId);
+        strafeAt(e.clientX, e.clientY);
+    });
+    cvGrid.el.addEventListener('pointermove', (e) => {
+        if (strafing) strafeAt(e.clientX, e.clientY);
+    });
+    cvGrid.el.addEventListener('pointerup', () => {
+        strafing = false;
+    });
+    cvGrid.el.addEventListener('pointercancel', () => {
+        strafing = false;
     });
 
-    $bPlaySel.addEventListener('click', () => firePlay(selected, 0.9, 0, 1));
-
-    $bRace.addEventListener('click', async () => {
-        $bRace.disabled = true;
-        await rebuild(true);
-        // thunder is 2.6s from decoding. play() cannot fire it, so it queues - and
-        // defineSounds() flushes the queue the moment the buffer lands.
-        firePlay('thunder', 1, 0, 1);
-        $bRace.disabled = false;
-    });
-
-    $bReload.addEventListener('click', async () => {
-        $bReload.disabled = true;
-        const wasUnlocked = engine.unlocked().peek();
-        await rebuild(wasUnlocked);
-        $bReload.disabled = false;
-    });
-
+    // ---- scene 2: bus desk ----
     $bMute.addEventListener('click', () => engine.setMuted(!engine.muted().peek()));
-    $bStopAll.addEventListener('click', () => {
-        engine.stopAll();
-        logPush('stop', 'stopAll(): every voice on every bus');
+
+    $bSting.addEventListener('click', () => {
+        // A short burst on sfx: loud enough to trip an armed auto-duck.
+        for (let i = 0; i < 3; i++) fire('sting', 0.9, (i - 1) * 0.3, 1);
+        logPush('play', 'sting x3 on sfx');
     });
 
-    $bTwins.addEventListener('click', () => {
-        engine.stopAll();
-        twinSfx = firePlay('laser', 0.9, -0.6, 1);   // sfx bus, first free channel
-        twinUi = firePlay('click', 0.9, 0.6, 1);     // ui bus, first free channel
-        if (twinSfx < 0 || twinUi < 0) {
-            $twinNote.textContent = 'Unlock the engine on scene 1 first: locked plays queue instead of issuing handles.';
-            return;
+    $bDuck.addEventListener('click', () => {
+        engine.duck('music', 0.2, {attack: 0.05, release: 0.3});
+        logPush('duck', 'duck(music, 0.2) attack 0.05s');
+        // Release after the sting's tail so attack and release both show on the trace.
+        setTimeout(() => {
+            engine.stopDuck('music', {release: 0.3});
+            logPush('duck', 'stopDuck(music) release 0.30s');
+        }, 450);
+    });
+
+    $bAuto.addEventListener('click', () => {
+        autoDuck = !autoDuck;
+        $bAuto.classList.toggle('on', autoDuck);
+        $bAuto.setAttribute('aria-pressed', autoDuck ? 'true' : 'false');
+        if (autoDuck) {
+            engine.duckOn('sfx', 'music', {threshold: 1, level: 0.25, attack: 0.05, release: 0.35});
+            logPush('duck', 'duckOn(sfx -> music): sfx voices dip music');
+        } else {
+            // No public "remove rule"; releasing the target is the honest revert.
+            engine.stopDuck('music', {release: 0.35});
+            logPush('duck', 'auto-duck off (music released; rule stays until rebuild)');
         }
-        const rawSame = (twinSfx >>> 0) === (twinUi >>> 0);
-        $twinNote.textContent =
-            'sfx handle ' + twinSfx + ' and ui handle ' + twinUi + ' differ, but the raw pool handles underneath are ' +
-            hex32(twinSfx) + ' and ' + hex32(twinUi) + ' - ' + (rawSame ? 'identical' : 'different') +
-            '. The bus tag is the only thing keeping stop() from crossing the wire.';
     });
 
-    $bStopSfx.addEventListener('click', () => {
-        if (twinSfx < 0) {
-            $twinNote.textContent = 'Issue the twin handles first.';
-            return;
-        }
-        engine.stop(twinSfx);
-        const ui = twinUi >= 0 && engine.isPlaying(twinUi);
-        $twinNote.textContent = 'Stopped the sfx voice. ui voice still playing: ' + ui +
-            '. Broadcast stop() would have killed it too - same raw handle, same channel, matching generation.';
-        logPush('stop', 'stop(sfx twin) / ui alive: ' + ui);
+    // ---- scene 3: crossfade deck ----
+    $sXfade.addEventListener('input', () => {
+        xfadeMs = $sXfade.value | 0;
+        $oXfade.textContent = xfadeMs + 'ms';
     });
-
-    $bOverrun.addEventListener('click', () => {
-        for (let i = 0; i < 10; i++) firePlay('laser', 0.7, (i / 9) * 2 - 1, 0.9 + i * 0.03);
-    });
+    xfadeMs = $sXfade.value | 0;
+    $oXfade.textContent = xfadeMs + 'ms';
 
     document.querySelectorAll('[data-track-play]').forEach((b) => {
         b.addEventListener('click', () => {
@@ -2560,69 +2502,162 @@
             musicGuard(b.dataset.trackPlay);
         });
     });
-    document.querySelectorAll('[data-track-stop]').forEach((b) => {
-        b.addEventListener('click', () => {
-            if (engine) engine.stopTrack(b.dataset.trackStop, {fade: xfadeMs});
-        });
-    });
-    document.querySelectorAll('[data-track-pause]').forEach((b) => {
-        b.addEventListener('click', () => {
-            if (engine) engine.pauseTrack(b.dataset.trackPause);
-        });
-    });
-    document.querySelectorAll('[data-track-resume]').forEach((b) => {
-        b.addEventListener('click', () => {
-            if (!engine) return;
-            engine.resumeTrack(b.dataset.trackResume);
-            musicGuard(b.dataset.trackResume);
-        });
-    });
-
-    // playTrack is a silent no-op while the context is locked - music is scene-scale, so
-    // unlike SFX it is not queued. Say so, instead of leaving a dead button.
-    function musicGuard(id) {
-        if (!engine.unlocked().peek()) {
-            $musicHint.textContent = 'locked: playTrack does not queue';
-            logPush('drop', 'playTrack(' + id + ') ignored: context locked');
-        }
-    }
-
-    $sXfade.addEventListener('input', () => {
-        xfadeMs = $sXfade.value | 0;
-        $oXfade.textContent = xfadeMs + 'ms';
-    });
-
-    // Seed from the control, not from a number typed twice.
-    xfadeMs = $sXfade.value | 0;
-    $oXfade.textContent = xfadeMs + 'ms';
 
     $bXfBoss.addEventListener('click', () => {
-        if (!engine) return;
         engine.crossfade('theme', 'boss', xfadeMs);
         logPush('play', 'crossfade theme -> boss over ' + xfadeMs + 'ms');
         musicGuard('boss');
     });
     $bXfTheme.addEventListener('click', () => {
-        if (!engine) return;
         engine.crossfade('boss', 'theme', xfadeMs);
         logPush('play', 'crossfade boss -> theme over ' + xfadeMs + 'ms');
         musicGuard('theme');
     });
-    $bExclusive.addEventListener('click', () => {
-        if (!engine) return;
-        engine.playExclusive('boss', {fade: xfadeMs});
-        logPush('play', 'playExclusive(boss): other tracks on the music bus fade out');
-        musicGuard('boss');
-    });
     $bStopMusic.addEventListener('click', () => {
-        if (!engine) return;
         engine.stopBus('music', {fade: xfadeMs});
-        logPush('stop', 'stopBus(music): the voices and the tracks on that bus');
+        logPush('stop', 'stopBus(music): voices and tracks on the bus');
+    });
+
+    let snapsReady = false;
+
+    function ensureSnapshots() {
+        if (snapsReady) return;
+        // A = music forward; B = sfx forward. Capture by setting, snapping, capturing.
+        engine.setBusVolume('music', 0.85);
+        engine.setBusVolume('sfx', 0.25);
+        engine.setBusVolume('ui', 0.25);
+        engine.captureSnapshot('A');
+        engine.setBusVolume('music', 0.2);
+        engine.setBusVolume('sfx', 0.9);
+        engine.setBusVolume('ui', 0.7);
+        engine.captureSnapshot('B');
+        snapsReady = true;
+        logPush('snap', 'captured A (music up) + B (sfx up)');
+    }
+
+    $bSnapA.addEventListener('click', () => {
+        ensureSnapshots();
+        engine.applySnapshot('A', xfadeMs);
+        logPush('snap', 'applySnapshot(A) morph ' + xfadeMs + 'ms');
+    });
+    $bSnapB.addEventListener('click', () => {
+        ensureSnapshots();
+        engine.applySnapshot('B', xfadeMs);
+        logPush('snap', 'applySnapshot(B) morph ' + xfadeMs + 'ms');
+    });
+
+    function musicGuard(id) {
+        if (!engine.unlocked().peek()) {
+            $xfHint.textContent = 'locked: playTrack does not queue';
+            logPush('drop', 'playTrack(' + id + ') ignored: context locked');
+        }
+    }
+
+    // ---- scene 4: unlock theater ----
+    $bGesture.addEventListener('click', () => {
+        uPush('state', 'dispatching synthetic first gesture');
+        fakeWin.fire();
+    });
+
+    $bRelock.addEventListener('click', async () => {
+        $bRelock.disabled = true;
+        simState = null;
+        await rebuild(false, false);
+        $bRelock.disabled = false;
+    });
+
+    $bArm.addEventListener('click', () => {
+        const ok = engine.enableAutoSuspend({after: 4});
+        $armNote.textContent = ok ? 'armed: 4s of silence -> dormant' : 'refused (iOS UA)';
+        uPush('state', ok ? 'enableAutoSuspend(4s) -> armed' : 'enableAutoSuspend -> refused (iOS)');
+    });
+
+    $bWake.addEventListener('click', () => {
+        // play() resumes an auto-suspended context through the unlock path.
+        fire('blip', 0.6, 0, 1);
+        uPush('play', 'play() -> wake from dormant (if suspended)');
+    });
+
+    $bSimIos.addEventListener('click', simulateInterruption);
+
+    // ---- shared ----
+    $bStopAll.addEventListener('click', () => {
+        engine.stopAll();
+        logPush('stop', 'stopAll(): every voice on every bus');
     });
 
     window.addEventListener('keydown', (e) => {
         if (e.code === 'Escape' && engine) engine.stopAll();
     });
+
+    // Visibility transitions stream into the unlock log - the real event the engine
+    // uses to resume a backgrounded tab.
+    document.addEventListener('visibilitychange', () => {
+        uPush('state', 'visibility -> ' + document.visibilityState);
+    });
+
+    // ---- footer: migration diff + soak ----
+    $bMigrate.addEventListener('click', () => {
+        const open = $migrateDiff.hidden;
+        $migrateDiff.hidden = !open;
+        $bMigrate.classList.toggle('on', open);
+        $bMigrate.setAttribute('aria-pressed', open ? 'true' : 'false');
+    });
+
+    // Soak: switch all four scenes 100 times, read the heap delta. Because nothing
+    // is allocated on a scene switch (no analysers or listeners are created here),
+    // this should hold flat. See DEMO-GATE.md for the DevTools protocol.
+    $bSoak.addEventListener('click', async () => {
+        if (!engine) return;
+        $bSoak.disabled = true;
+        const mem = performance.memory;
+        const before = mem ? mem.usedJSHeapSize : 0;
+        const startScene = scene;
+        $soakOut.className = '';
+        $soakOut.textContent = 'running...';
+        for (let n = 0; n < 100; n++) {
+            for (let s = 0; s < 4; s++) {
+                selectScene(s);
+                sizeAll();
+                needResize = 0;
+                // draw the active scene once so its full path runs
+                if (engine) {
+                    if (s === 0) {
+                        drawGrid();
+                        drawVScope();
+                    } else if (s === 1) {
+                        sampleDuck();
+                        drawDuck();
+                        drawVu();
+                    } else if (s === 2) {
+                        sampleXfade();
+                        drawXfade();
+                        drawRings();
+                    } else {
+                        paintFsm();
+                    }
+                }
+            }
+            if ((n & 15) === 0) {
+                $soakOut.textContent = 'running... ' + n + '/100';
+                await new Promise((r) => requestAnimationFrame(r));
+            }
+        }
+        selectScene(startScene);
+        const after = mem ? mem.usedJSHeapSize : 0;
+        if (mem) {
+            const delta = (after - before) / 1024;
+            $soakOut.textContent = '400 switches / heap delta ' + (delta >= 0 ? '+' : '') + delta.toFixed(0) + ' KB';
+            $soakOut.className = Math.abs(delta) > 1024 ? 'warn' : '';
+        } else {
+            $soakOut.textContent = '400 switches done (no performance.memory - use DevTools)';
+        }
+        $bSoak.disabled = false;
+    });
+
+    // ==========================================================================
+    // Gate
+    // ==========================================================================
 
     $gateBtn.addEventListener('click', async () => {
         $gateBtn.disabled = true;
@@ -2630,6 +2665,7 @@
         try {
             await boot();
             $gate.hidden = true;
+            selectScene(0);
             requestAnimationFrame(frame);
         } catch (err) {
             $gateBtn.textContent = 'failed, see console';

@@ -234,7 +234,11 @@ export class LiteAudio {
         this._poolCapacity = opts.poolCapacity ?? 32;
         this._queueLimit = opts.queueLimit ?? DEFAULT_QUEUE_LIMIT;
         this._mutedKey = opts.mutedStorageKey ?? MUTED_STORAGE_KEY;
-        this._fetch = opts.fetch || (typeof fetch !== 'undefined' ? fetch : null);
+        // Bind the default: the browser's fetch throws "Illegal invocation" if
+        // called as a method (this._fetch(url) sets this = the engine), so the
+        // documented globalThis.fetch default must be bound to globalThis. An
+        // injected opts.fetch is the caller's to bind.
+        this._fetch = opts.fetch || (typeof fetch !== 'undefined' ? fetch.bind(globalThis) : null);
         this._window = opts.window ?? (typeof window !== 'undefined' ? window : null);
         this._document = opts.document ?? (typeof document !== 'undefined' ? document : null);
         // Test-injectable timers. Real setTimeout/clearTimeout in production;

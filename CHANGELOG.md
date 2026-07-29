@@ -41,6 +41,19 @@ engine. A row without a test id is not a parity claim.
   wiring now fails that track closed (`loadState: 'error'`) instead of throwing
   into `playTrack()`. Off every hot path (first-play wiring only).
 
+### Fixed
+
+- **Default `fetch` is now bound to `globalThis`.** The constructor documents
+  `opts.fetch` as "defaults to `globalThis.fetch`", but it stored the bare
+  reference and later called it as `this._fetch(url)` — which runs `fetch` with
+  the engine as receiver, and a browser rejects that with *"Failed to execute
+  'fetch' on 'Window': Illegal invocation"*. Any consumer that relied on the
+  documented default (rather than injecting `opts.fetch`) got every sound stuck
+  in `loadState: 'error'`. The default is now `fetch.bind(globalThis)`. One
+  constructor line, off every hot path (`HashParity` unchanged); regression test
+  in [`test/Audio.test.js`](test/Audio.test.js) simulates the browser's receiver
+  guard. Surfaced by the AU3 demo dogfooding the real default load path.
+
 ### The impedance match (documented divergences, all tested)
 
 The manager wraps everything in one `Howl`; lite-audio splits pooled one-shot

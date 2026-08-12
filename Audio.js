@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.2.0';
+export const VERSION = '2.3.0';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -159,6 +159,26 @@ function scaleCurve(base, delta, start) {
 
 /** Position signal write throttle: >= 100 ms of ctx time between writes. */
 const POSITION_WRITE_INTERVAL = 0.1;
+
+/**
+ * Stereo widener constants (S5). A bus built with { width } arms a Haas-pair
+ * widener: the dry (mono) signal is duplicated into two short-delayed copies
+ * panned hard L/R, summed back with the dry through a makeup gain. The two delays
+ * are the classic Haas offsets (12 ms / 19 ms) -- distinct, both under the ~30 ms
+ * fusion threshold so the ear hears one wide source, not an echo. WIDTH_WET_MAX is
+ * the wet gain at width=1 (0.5 -> the wet pair is half the dry level before
+ * makeup); WIDTH_TC is the setTargetAtTime time constant the ~10 Hz monitor uses
+ * so a width change glides click-free. WIDTH_SETTLE_TICKS is how many monitor ticks
+ * after a width-to-0 request the flush waits before snapping wet to EXACTLY 0 and
+ * makeup to EXACTLY 1 with setValueAtTime -- setTargetAtTime is exponential and
+ * never reaches its target, so bypass would otherwise leave a hair of wet signal;
+ * the exact snap makes width=0 bit-identical to an unarmed bus.
+ */
+const HAAS_DELAY_L = 0.012;
+const HAAS_DELAY_R = 0.019;
+const WIDTH_WET_MAX = 0.5;
+const WIDTH_TC = 0.05;
+const WIDTH_SETTLE_TICKS = 4;
 
 /**
  * Shared monitor tick, ~10 Hz. One low-frequency timer drives meters, the duck
@@ -443,6 +463,14 @@ export class LiteAudio {
      *   panningModel to 'HRTF' for per-voice binaural convolution -- headphones-only,
      *   higher CPU; an HRIR prewarm eats the first-play hitch. An unknown value is a
      *   wiring error and fails closed with a did-you-mean, never a silent ignore.
+     * @param {number} [opts.width] - arm a stereo Haas widener on this bus (S5). A
+     *   number in [0, 1] builds 7 extra nodes (a delay/pan wet pair + dry/makeup
+     *   sum) between the pool and the bus gain and enables setWidth(). Omitted =>
+     *   graph byte-identical to prior releases (no widener nodes). Stereo-only: a
+     *   width > 0 on a positional/hrtf bus fails closed (RangeError), and a
+     *   non-finite / boolean / out-of-range width is a wiring error, not a silent
+     *   ignore. If the loaded source turns out to be non-mono, defineSounds disarms
+     *   the widener (a Haas pair only makes sense on a mono source).
      * @returns {Object} the bus record.
      */
     _buildBus(name, opts = {}) {
@@ -457,11 +485,74 @@ export class LiteAudio {
             );
         }
 
+        // Stereo widener (S5). Validated and armed COLD here; the hot play()/stop()
+        // and the ~10 Hz monitor never re-test any of this. Fail closed on a bad
+        // value with a did-you-mean, matching the spatial guard above: a widener is
+        // opt-in, and a typo must surface at createBus() rather than as a silent flat
+        // (or exploded) mix. A non-number, NaN/Infinity, boolean true (a common
+        // "just turn it on" typo), or an out-of-range number is rejected.
+        const armWidth = opts.width !== undefined;
+        if (armWidth) {
+            const w = opts.width;
+            if (typeof w !== 'number' || w !== w || w === Infinity || w === -Infinity || w < 0 || w > 1) {
+                throw new RangeError(
+                    'LiteAudio: createBus("' + name + '") got invalid width ' + String(w) +
+                    ' -- expected a number in [0, 1] (did you mean width: 1 to open it fully, or ' +
+                    'omit width to leave the bus mono?).'
+                );
+            }
+            // Stereo-only: a Haas widener is a stereo effect, so a positional/hrtf bus
+            // (which owns per-voice panning) must never compose with one. Refuse at
+            // construction so the two spatial models can never fight over the image.
+            if (w > 0 && spatial !== 'stereo') {
+                throw new RangeError(
+                    'LiteAudio: createBus("' + name + '") got width ' + w + ' on a "' + spatial +
+                    '" bus -- the stereo widener is stereo-only and does not compose with a ' +
+                    'positional/hrtf bus (did you mean spatial: "stereo", or drop width?).'
+                );
+            }
+        }
+
         const gain = this._ctx.createGain();
         const duckGain = this._ctx.createGain();
         duckGain.gain.value = DUCK_REST;
         gain.connect(duckGain);
         duckGain.connect(this._master);
+
+        // Widener slots default null (unarmed => graph byte-identical to a plain bus).
+        // poolOut is the node the pool's voices connect to: the widener input when
+        // armed, the bus gain otherwise. Built here, COLD, only when opts.width given.
+        let wideIn = null, wideMakeup = null, wideWet = null;
+        let delayL = null, delayR = null, panL = null, panR = null;
+        let poolOut = gain;
+        // Stereo-only: the widener composes only with a stereo bus. width > 0 on a
+        // positional/hrtf bus already threw at the guard above; width === 0 on such a
+        // bus is a no-op request (nothing wide asked for), so build NO widener --
+        // wideIn stays null and setWidth is inert via its wideIn===null guard, so a
+        // Haas widener can never be inserted onto a per-voice-panned image (SP-06).
+        if (armWidth && spatial === 'stereo') {
+            wideIn = this._ctx.createGain();
+            wideMakeup = this._ctx.createGain();
+            wideWet = this._ctx.createGain();
+            delayL = this._ctx.createDelay(1);
+            delayR = this._ctx.createDelay(1);
+            panL = this._ctx.createStereoPanner();
+            panR = this._ctx.createStereoPanner();
+            delayL.delayTime.value = HAAS_DELAY_L;
+            delayR.delayTime.value = HAAS_DELAY_R;
+            panL.pan.value = -1;
+            panR.pan.value = 1;
+            wideWet.gain.value = 0;      // start bypassed; the monitor ramps it in
+            wideMakeup.gain.value = 1;
+            // Dry: pool -> wideIn -> wideMakeup. Wet: wideIn -> delay -> hard pan ->
+            // wideWet -> wideMakeup. wideMakeup -> gain sums dry + wet back together.
+            wideIn.connect(wideMakeup);
+            wideIn.connect(delayL); delayL.connect(panL); panL.connect(wideWet);
+            wideIn.connect(delayR); delayR.connect(panR); panR.connect(wideWet);
+            wideWet.connect(wideMakeup);
+            wideMakeup.connect(gain);
+            poolOut = wideIn;
+        }
 
         const sVol = signal(1);
         const sMut = signal(false);
@@ -515,6 +606,24 @@ export class LiteAudio {
             hrtfWarmHandle: null,
             hrtfWarmed: false,
             hrtfWarmPending: 0,
+            // Stereo widener state (S5). The 7 nodes stay null on an unarmed bus (no
+            // extra graph, byte-identical to prior releases). poolOut is the node the
+            // pool connects to: wideIn when armed, gain otherwise. `width` is the
+            // current target (0..1); widthLast is the last value the monitor actually
+            // wrote (NaN => force the first flush); widthDirty is the setWidth->flush
+            // hand-off bit; widthSettle counts monitor ticks to the exact-bypass snap
+            // when width reaches 0; widthRefused records a disarm reason (a non-mono
+            // source) so setWidth stays a no-op and a caller can introspect why.
+            wideIn, wideMakeup, wideWet, delayL, delayR, panL, panR,
+            poolOut,
+            width: armWidth ? opts.width : 0,
+            widthLast: NaN,
+            widthDirty: armWidth && opts.width > 0 ? 1 : 0,
+            // 0, not WIDTH_SETTLE_TICKS: a bus armed at width 0 starts widthDirty=0,
+            // so a nonzero settle would never count down anyway -- and construction
+            // already leaves wet=0/makeup=1 (a bit-exact bypass), so no snap is owed.
+            widthSettle: 0,
+            widthRefused: null,
         };
         this._buses.set(name, busRec);
         this._busList.push(busRec);
@@ -524,6 +633,9 @@ export class LiteAudio {
         // _startMonitor() is idempotent-guarded, so this is a no-op if already up.
         // Reads the derived positional flag so 'hrtf' (positional-family) arms it too.
         if (busRec.positional) this._startMonitor();
+        // An armed widener writes its wet/makeup params on the same ~10 Hz monitor,
+        // so it must ensure the tick is running too (idempotent-guarded).
+        if (wideIn !== null) this._startMonitor();
         return busRec;
     }
 
@@ -665,13 +777,29 @@ export class LiteAudio {
             // per-play buffer, which is why we asked the pool to grow that arg
             // in v1.1.0. spriteMap only needs to name what CAN be played.
             const dummyBuffer = ids.length > 0 ? this._sounds.get(ids[0]).buffer : null;
+            // Stereo widener source check (S5). A Haas widener synthesises a stereo
+            // image from a MONO source; feeding it a stereo source would fold the
+            // channels and smear the mix. So an armed bus whose loaded buffers are
+            // not all mono is DISARMED here (cold, at pool build) -- the widener nodes
+            // are torn down, the pool routes straight to gain, and setWidth() becomes
+            // a no-op with widthRefused='stereo-source' recording why. Warn once.
+            if (busRec.wideIn !== null) {
+                let nonMono = false;
+                for (const id of ids) {
+                    const buf = this._sounds.get(id).buffer;
+                    if (buf && buf.numberOfChannels !== 1) { nonMono = true; break; }
+                }
+                if (nonMono) this._disarmWidth(busRec, 'stereo-source');
+            }
             // Spatial mode is captured HERE, at pool construction (cold), so the
             // hot play() never re-tests it: a stereo bus builds StereoPanner voices
             // (byte-identical to prior releases), a positional bus builds PannerNode
             // voices. On a rebuild we reuse the existing scratch arrays and zero
-            // them; the pool destroy() above already tore down the old voices.
+            // them; the pool destroy() above already tore down the old voices. An
+            // armed widener routes the pool into wideIn (busRec.poolOut); every other
+            // bus routes straight to gain, byte-identical to prior releases.
             busRec.pool = new AudioPool(
-                this._ctx, dummyBuffer, spriteMap, this._poolCapacity, busRec.gain,
+                this._ctx, dummyBuffer, spriteMap, this._poolCapacity, busRec.poolOut,
                 { panner: busRec.spatial }
             );
             if (busRec.positional) {
@@ -1377,6 +1505,85 @@ export class LiteAudio {
 
     setMuted(state) { this._sMuted.set(!!state); }
 
+    // ---------- Stereo width (S5) ------------------------------------------
+
+    /**
+     * Set the stereo width of a bus armed with { width } (S5). Caller-frame safe:
+     * like setPosition(), it does NO param write and allocates nothing -- it only
+     * clamps, stamps two fields (the target width and the settle counter) and sets a
+     * dirty bit. The wet/makeup AudioParam writes ride the cold ~10 Hz monitor
+     * (_flushWidth), so a caller that drives width every frame still produces at most
+     * one param event per axis per tick. Fail closed: an unarmed bus, a bus disarmed
+     * for a non-mono source (widthRefused set), or a non-number / NaN width is a
+     * silent no-op. `w` is clamped to [0, 1]; 0 fully bypasses (bit-exact after the
+     * settle), 1 is fully wide.
+     * @param {string} busName
+     * @param {number} w - target width, clamped to [0, 1]
+     * @returns {void}
+     */
+    setWidth(busName, w) {
+        if (this._destroyed) return;
+        const busRec = this._buses.get(busName);
+        if (busRec === undefined) return;
+        if (busRec.wideIn === null) return;          // unarmed bus
+        if (busRec.widthRefused !== null) return;    // disarmed (non-mono source)
+        if (typeof w !== 'number' || w !== w) return;  // non-number / NaN
+        if (w < 0) w = 0; else if (w > 1) w = 1;     // clamp to [0, 1]
+        busRec.width = w;
+        busRec.widthSettle = w === 0 ? WIDTH_SETTLE_TICKS : 0;
+        busRec.widthDirty = 1;
+    }
+
+    /**
+     * Current stereo width of a bus (S5), or null on an unarmed / disarmed / unknown
+     * bus. Reflects the last accepted setWidth() target, not the param's momentary
+     * ramp value.
+     * @param {string} busName
+     * @returns {number|null}
+     */
+    widthOf(busName) {
+        const busRec = this._buses.get(busName);
+        if (busRec === undefined) return null;
+        if (busRec.wideIn === null || busRec.widthRefused !== null) return null;
+        return busRec.width;
+    }
+
+    /**
+     * Tear down a bus's stereo widener (S5). Called COLD when defineSounds discovers
+     * a non-mono source (a Haas widener only makes sense on a mono source) and by
+     * destroy(). Disconnects and nulls all 7 widener nodes, routes the pool's future
+     * output back to the bus gain, and records the disarm reason so setWidth() stays
+     * a no-op and a caller can introspect why. Warns once per disarm reason.
+     * @param {Object} busRec
+     * @param {string|null} reason - e.g. 'stereo-source', or null for a plain teardown
+     */
+    _disarmWidth(busRec, reason) {
+        if (busRec.wideIn === null) { if (reason !== null) busRec.widthRefused = reason; return; }
+        if (reason === 'stereo-source' && busRec.widthRefused !== reason &&
+            typeof console !== 'undefined' && typeof console.warn === 'function') {
+            console.warn('LiteAudio: bus stereo widener disarmed -- a loaded source is not mono; ' +
+                'the Haas widener is a mono-source effect, so setWidth() is now a no-op on this bus.');
+        }
+        try { busRec.wideIn.disconnect(); } catch {}
+        try { busRec.wideMakeup.disconnect(); } catch {}
+        try { busRec.wideWet.disconnect(); } catch {}
+        try { busRec.delayL.disconnect(); } catch {}
+        try { busRec.delayR.disconnect(); } catch {}
+        try { busRec.panL.disconnect(); } catch {}
+        try { busRec.panR.disconnect(); } catch {}
+        busRec.wideIn = null;
+        busRec.wideMakeup = null;
+        busRec.wideWet = null;
+        busRec.delayL = null;
+        busRec.delayR = null;
+        busRec.panL = null;
+        busRec.panR = null;
+        busRec.poolOut = busRec.gain;
+        busRec.widthDirty = 0;
+        busRec.widthSettle = 0;
+        if (reason !== null) busRec.widthRefused = reason;
+    }
+
     // ---------- Ducking (v1.2.0) -------------------------------------------
 
     /**
@@ -1680,6 +1887,7 @@ export class LiteAudio {
                 this._evalDuckRules();
                 this._sweepMeters();
                 this._flushPositions();
+                this._flushWidth();
                 this._evalAutoSuspend();
                 this._monitorTimer = this._setTimeout(this._monitorTick, MONITOR_INTERVAL_MS);
             };
@@ -1773,6 +1981,59 @@ export class LiteAudio {
                     node.positionZ.setTargetAtTime(xyz[i3 + 2], now, POS_TC);
                 }
                 dirty[w] = 0;                        // every bit in this word handled
+            }
+        }
+    }
+
+    /**
+     * Flush pending stereo-width changes on the cold ~10 Hz monitor (S5). This is
+     * the ONLY place the widener's wet/makeup gains are written. setWidth() only
+     * stamps a target + a dirty bit; here, on the tick, a dirty bus writes at most
+     * one setTargetAtTime per param -- and only when the target actually MOVED
+     * (widthLast !== width) -- so a caller driving width every frame still produces
+     * ~10 events/param/second, the same native-event bound the position flush honours.
+     *
+     * The wet gain is WIDTH_WET_MAX * width; the makeup gain is 1/sqrt(1 + 4*wet^2),
+     * which holds total power flat as width opens (the two hard-panned wet copies add
+     * 4*wet^2 of power to the dry's 1). setTargetAtTime is exponential and never
+     * reaches its target, so a width driven to exactly 0 would leave a hair of wet
+     * signal forever; WIDTH_SETTLE_TICKS ticks after the last move to 0 the flush
+     * snaps wet to EXACTLY 0 and makeup to EXACTLY 1 with setValueAtTime, making a
+     * bypassed widener bit-identical to an unarmed bus. Allocation-free: indexed loop,
+     * locals only, no iterators.
+     */
+    _flushWidth() {
+        const list = this._busList;
+        for (let b = 0; b < list.length; b++) {
+            const busRec = list[b];
+            if (busRec.wideIn === null) continue;    // unarmed / disarmed
+            if (!busRec.widthDirty) continue;
+            const w = busRec.width;
+            if (w !== busRec.widthLast) {
+                const wet = WIDTH_WET_MAX * w;
+                const makeup = 1 / Math.sqrt(1 + 4 * wet * wet);
+                const now = this._ctx.currentTime;
+                busRec.wideWet.gain.setTargetAtTime(wet, now, WIDTH_TC);
+                busRec.wideMakeup.gain.setTargetAtTime(makeup, now, WIDTH_TC);
+                busRec.widthLast = w;
+            }
+            if (w === 0) {
+                // Ramp is in flight; count ticks, then snap to an EXACT bypass so no
+                // residual wet survives the exponential approach. Stays dirty until
+                // the snap so the tick keeps counting.
+                if (busRec.widthSettle > 0) {
+                    busRec.widthSettle--;
+                    if (busRec.widthSettle === 0) {
+                        const now = this._ctx.currentTime;
+                        busRec.wideWet.gain.setValueAtTime(0, now);
+                        busRec.wideMakeup.gain.setValueAtTime(1, now);
+                        busRec.widthDirty = 0;
+                    }
+                } else {
+                    busRec.widthDirty = 0;
+                }
+            } else {
+                busRec.widthDirty = 0;
             }
         }
     }
@@ -1986,6 +2247,13 @@ export class LiteAudio {
             // a handle into a torn-down pool.
             busRec.hrtfWarmHandle = null;
             busRec.hrtfWarmPending = 0;
+            // Disconnect + null all 7 stereo widener nodes (S5) and reset width state.
+            // Null (not zero): a torn-down bus carries no widener, so a stray setWidth
+            // after destroy must no-op via the wideIn===null guard.
+            this._disarmWidth(busRec, null);
+            busRec.width = 0;
+            busRec.widthLast = NaN;
+            busRec.widthRefused = null;
         }
 
         // Tear down every track: cancel pending pause, remove element handlers,

@@ -65,6 +65,20 @@ export function mockPanner() {
 }
 
 /**
+ * DelayNode stand-in for the S5 stereo widener. The widener builds two DelayNodes
+ * (a Haas pair) per armed bus and writes delayTime at construction, so delayTime is
+ * an AudioParam mock whose .events array the torture tiers count exactly like every
+ * other param. connect/disconnect ride the same baseNode tracker as the rest of the
+ * graph, so a build/teardown soak proves the delays are disconnected on destroy.
+ */
+export function mockDelay(maxDelayTime = 1) {
+    const n = baseNode('delay');
+    n.delayTime = mockParam(0);
+    n.maxDelayTime = maxDelayTime;
+    return n;
+}
+
+/**
  * PannerNode stand-in for positional mode (S3). The pool builds one per voice in
  * 'positional' mode and writes panningModel/distanceModel/refDistance/maxDistance/
  * rolloffFactor at construction, so those are plain writable properties here. The
@@ -242,6 +256,7 @@ export function createMockContext({ sampleRate = 44100, state = 'suspended' } = 
 
         createGain: () => mockGain(),
         createStereoPanner: () => mockPanner(),
+        createDelay: (maxDelayTime) => mockDelay(maxDelayTime),
         createPanner: () => mockPanner3D(),
         createBufferSource: () => { const n = mockBufferSource(); sources.push(n); return n; },
         createBuffer: (ch, len, sr) => mockAudioBuffer(ch, len, sr),

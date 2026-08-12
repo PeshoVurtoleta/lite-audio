@@ -122,6 +122,18 @@ export interface CreateBusOptions {
      * (RangeError).
      */
     spatial?: 'stereo' | 'positional' | 'hrtf';
+
+    /**
+     * Arm a stereo Haas widener on this bus and enable setWidth() (S5). A number
+     * in [0, 1] builds 7 extra nodes (a delayed/hard-panned wet pair summed with
+     * the dry through a makeup gain) between the pool and the bus gain. Omitted =>
+     * graph byte-identical to prior releases (no widener). Stereo-only: a width > 0
+     * on a positional/hrtf bus fails closed (RangeError), as does a non-finite,
+     * boolean, or out-of-range value. If the loaded source is non-mono the widener
+     * is disarmed at pool build (a Haas widener is a mono-source effect) and
+     * setWidth() becomes a no-op.
+     */
+    width?: number;
 }
 
 export interface AutoSuspendOptions {
@@ -301,6 +313,20 @@ export class LiteAudio {
     setBusVolume(busName: string, volume: number): void;
     setBusMuted(busName: string, muted: boolean): void;
     setMuted(state: boolean): void;
+
+    /**
+     * Set the stereo width of a bus armed with { width } (S5). Caller-frame safe:
+     * like setPosition(), it does NO param write and allocates nothing -- it clamps
+     * `w` to [0, 1] and stamps a target + a dirty bit; the wet/makeup writes ride the
+     * ~10 Hz monitor. Fail-closed: an unarmed bus, a bus disarmed for a non-mono
+     * source, or a non-number / NaN width is a silent no-op. 0 fully bypasses
+     * (bit-exact after a short settle), 1 is fully wide.
+     */
+    setWidth(busName: string, w: number): void;
+
+    /** Current stereo width of a bus (last accepted setWidth target), or null on an
+     *  unarmed / disarmed / unknown bus. */
+    widthOf(busName: string): number | null;
 
     // ---------- Mix intelligence (v1.2.0) ----------------------------------
 

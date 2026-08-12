@@ -1,5 +1,69 @@
 # Changelog
 
+## 2.3.0
+
+Per-bus stereo width, session S5 of the spatial roadmap (closes SP-04, SP-05,
+SP-06). A stereo bus can now be built with a mono-safe Haas widener, and its
+width is written on the existing cold `~10 Hz` monitor -- never per frame.
+
+Additive and default-off: a bus built without `width` is byte-for-byte
+unchanged (no widener nodes at all). `play()`, `stop()` and the `HashParity`
+`stop()` goldens do not move; the hot `play()` path gains zero new branches
+(the widener is armed at cold bus construction and the pool simply routes into
+it, never re-tested per shot).
+
+### Added
+
+- `createBus(name, { width: 0..1 })` -- arms a mono-safe Haas widener between the
+  pool output and the bus gain: the dry (mono) signal plus a delayed,
+  opposite-panned wet pair (`12 ms` hard-left, `19 ms` hard-right) summed back
+  through an explicit makeup gain of `1/sqrt(1 + 4*wet^2)`, so opening the width
+  holds total power flat at `0 dB` (SP-05) instead of getting louder. Omit `width`
+  and no widener nodes are built. Fails closed with a did-you-mean on a non-finite
+  / boolean / out-of-range value, and on `width > 0` for a `positional`/`hrtf` bus
+  (the stereo widener is stereo-only and does not compose with per-voice panning).
+- `setWidth(busName, w)` -- a caller-frame method safe to call every frame: it does
+  NO param write. It clamps to `[0, 1]`, stamps a target and a dirty bit (zero
+  allocation), and the `wet`/`makeup` `AudioParam` writes ride the cold `~10 Hz`
+  monitor (`_flushWidth`), at most one event per param per tick and only when the
+  value moves. `width: 0` is a bit-identical bypass: a few ticks after the last
+  move to `0` the flush snaps `wet` to exactly `0` and `makeup` to exactly `1`
+  with `setValueAtTime`, since `setTargetAtTime` never reaches its target. There is
+  deliberately no boolean "on" -- the only control is the `0..1` knob.
+- `widthOf(busName)` -- the current width, or `null` on an unarmed / disarmed /
+  unknown bus.
+
+### Changed
+
+- `defineSounds()` disarms a bus's widener at pool build if any loaded buffer is
+  non-mono (`numberOfChannels !== 1`): a Haas widener smears a stereo source
+  (SP-06), so the widener nodes are torn down, the pool routes straight to
+  `gain`, `setWidth()` becomes a no-op, and `widthRefused` records
+  `'stereo-source'` (warned once). The comb-filter mono-downmix hazard (SP-04) is
+  documented for single-speaker output.
+- `destroy()` disconnects and nulls all 7 widener nodes and resets the width state
+  (null, not zero: a stray `setWidth()` after teardown is a no-op).
+- The shared `~10 Hz` monitor tick now also runs `_flushWidth()` alongside the
+  duck follower, meter sweep, position flush and auto-suspend check.
+
+### Testing
+
+- New torture tier `T-SP6`: the width flush holds the `wet`/`makeup` native
+  param-event rate under a `200`/param cap (`~100` expected) with identical-value
+  writes collapsing to exactly `1`; `setWidth` is a zero-alloc stamp at `<= 4`
+  bytes/op with no major GC (the retained-`{w}`-box control lands clearly above);
+  and a lite-leak witness proves `destroy()` disconnects + nulls all 7 widener
+  nodes across 200 build/teardown cycles. Ships two proven red controls --
+  `LITEAUDIO_TORTURE_SP6_RED=1` (a `60 Hz` per-frame direct param writer that blows
+  the event cap) and `LITEAUDIO_TORTURE_SP6_ALLOC_RED=1` (a `setWidth` that boxes
+  into a retained object) -- each forces the failure and the gate exits non-zero.
+- New boundary suite `test/Width.test.js`: arming only when asked, the bit-exact
+  bypass snap, power conservation and the distinct Haas delays, fail-closed
+  construction (`width: true` / non-finite / out-of-range / `width > 0` on a
+  positional/hrtf bus), `setWidth` clamp + no-op on a non-number / unarmed /
+  disarmed bus, the non-mono disarm, throttled event collapse, and `destroy()`
+  teardown. `test/mock-ctx.js` gains a `DelayNode` mock (`createDelay`).
+
 ## 2.2.0
 
 HRTF spatial bus, session S4 of the spatial roadmap (closes SP-07). A bus can

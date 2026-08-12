@@ -195,6 +195,32 @@ const SP5_POS_OPS = 500_000;
 const SP5_POS_WARMUP = 50_000;
 const SP5_POS_MAX_BYTES_PER_OP = 0.05;
 
+// --- S5 stereo-width config (T-SP6) ------------------------------------------
+
+// T-SP6 (d): the SP-03 native-event bound applied to the widener's wet/makeup
+// params, counted PER PARAM on the mock. 100 monitor flushes at ~10 Hz, the caller
+// updating width at ~60 Hz between flushes (6 setWidth/tick). The throttle collapses
+// those to at most one event/param/tick when the value moves; alternating the value
+// per tick yields ~100 events. Cap is 200 (a 20 Hz ceiling), per param. The red
+// control writes the params directly every frame (60 Hz) -> ~600 events -> blows it.
+const SP6_TICKS = 100;
+const SP6_FRAMES_PER_TICK = 6;
+const SP6_EVENT_CAP = 200;
+const SP6_RED_HZ = 60;
+
+// T-SP6 (e): setWidth is a caller-frame method -- a clamp + two field writes + a
+// dirty bit, no param write, no box. 500k calls against a real engine (this path
+// touches no mock node). The red control boxes {w} into a retained object per call.
+const SP6_OPS = 500_000;
+const SP6_WARMUP = 50_000;
+const SP6_MAX_BYTES_PER_OP = 4.0;
+const SP6_CONTROL_MIN_BYTES_PER_OP = 8.0;
+
+// T-SP6 (f): retention witness. An armed widener allocates 7 extra nodes per bus;
+// destroy() must disconnect + null all 7. A lite-leak witness across build/teardown
+// cycles proves the release, the same way T-SP3 does for the positional scratch.
+const SP6_CYCLES = 200;
+
 const LEAK = process.env.LITEAUDIO_TORTURE_LEAK === '1';
 const SP1_RED = process.env.LITEAUDIO_TORTURE_SP1_RED === '1';
 const SP2_RED = process.env.LITEAUDIO_TORTURE_SP2_RED === '1';
@@ -206,6 +232,12 @@ const SP5_RED = process.env.LITEAUDIO_TORTURE_SP5_RED === '1';
 // settles to 0 even though teardown ran -- modelling a destroy() that stopped
 // releasing the scratch. The gate must reject.
 const SP3_RED = process.env.LITEAUDIO_TORTURE_SP3_RED === '1';
+// T-SP6 red controls. SP6_RED is a 60 Hz per-frame DIRECT writer onto the widener
+// wet/makeup params (no setWidth/flush throttle) -> the native event list blows the
+// cap. SP6_ALLOC_RED boxes {w} into a retained object per setWidth call -> non-zero
+// major GC / bytesPerOp over the ceiling. Both must exit non-zero.
+const SP6_RED = process.env.LITEAUDIO_TORTURE_SP6_RED === '1';
+const SP6_ALLOC_RED = process.env.LITEAUDIO_TORTURE_SP6_ALLOC_RED === '1';
 
 // --- helpers -----------------------------------------------------------------
 
@@ -401,6 +433,47 @@ async function buildHrtfEngine(voices, redRetire) {
     await audio.defineSounds({ ping: { src: ['/s.wav'], bus: 'spatial' } });
     await flushMicrotasks(8);                 // pool build fires the prewarm
     return { audio, ctx, baseline };
+}
+
+// --- S5 stereo-width engine builder ------------------------------------------
+
+/**
+ * Build a live LiteAudio (mock context) with ONE stereo bus armed with a widener
+ * ({ width: 0 } -- armed but bypassed), a mono sound loaded and one voice sounding,
+ * unlocked, monitor driven by hand. The mock's decodeAudioData returns a mono
+ * buffer, so the widener stays armed (a non-mono source would disarm it). Returns
+ * the engine, its context, and the armed bus record. 'wide' is created ONLY via
+ * createBus so it is actually built armed (createBus is idempotent-by-name).
+ */
+async function buildWidthEngine() {
+    const ctx = createMockContext({ state: 'suspended' });
+    const gestures = [];
+    const win = {
+        navigator: { userAgent: 'node-torture-gate', maxTouchPoints: 0 },
+        addEventListener: (_evt, cb) => gestures.push(cb),
+        removeEventListener: () => {},
+    };
+    const audio = new LiteAudio({
+        poolCapacity: 8,
+        window: win,
+        document: mockDocument(),
+        fetch: mockFetch({ '/s.wav': 500 }),
+        setTimeout: () => 0,
+        clearTimeout: () => {},
+    });
+    await audio.init(ctx);
+    audio.createBus('wide', { width: 0 });            // armed, start bypassed
+    await audio.defineSounds({ ping: { src: ['/s.wav'], bus: 'wide' } });
+    for (const cb of gestures) cb({});                // unlock
+    await flushMicrotasks(8);
+
+    const busRec = audio._buses.get('wide');
+    if (busRec.wideIn === null) {
+        die('width setup: bus "wide" was not armed (widener disarmed or width option dropped)');
+    }
+    const h = audio.play('ping', 1, 0, 1);
+    if (h < 0) die('width setup: play returned a skip sentinel (' + h + ')');
+    return { audio, ctx, busRec };
 }
 
 // --- gate --------------------------------------------------------------------
@@ -819,6 +892,169 @@ async function main() {
     if (sp5Leaked !== 0) {
         die('T-SP5: lite-leak witnessed ' + sp5Leaked + ' hrtf bus record(s) still holding a ' +
             'prewarm handle or positional scratch after destroy() -- a teardown leak.');
+    }
+
+    // 10) T-SP6 (S5): the stereo widener.
+    //    (d) the SP-03 native-event bound applied to the wet/makeup params: 100 flushes
+    //        at ~10 Hz, the caller updating width at ~60 Hz between flushes, stays under
+    //        a 200 events/param cap (~100 expected); identical-value writes collapse to
+    //        exactly 1. The red control writes the params directly at 60 Hz -> ~600.
+    //    (e) setWidth is a zero-alloc clamp + field stamp: 500k calls under a 4.0 B/op
+    //        ceiling, no major GC; the boxed control lands clearly above.
+    //    (f) destroy() disconnects + nulls all 7 widener nodes, witnessed by lite-leak
+    //        across SP6_CYCLES build/teardown cycles.
+
+    // (d) native-event bound.
+    const sp6 = await buildWidthEngine();
+    const wbus = sp6.busRec;
+    if (SP6_RED) {
+        const framesPerTick = (SP6_RED_HZ / 10) | 0;   // 6 frames per ~10 Hz tick
+        for (let t = 0; t < SP6_TICKS; t++) {
+            const now = sp6.ctx.currentTime;
+            for (let f = 0; f < framesPerTick; f++) {
+                // Direct per-frame param writes -- exactly what setWidth/_flushWidth
+                // exist to prevent -- so the native event list grows unbounded.
+                const val = ((t + f) & 1) ? 0.5 : 0.25;
+                wbus.wideWet.gain.setTargetAtTime(val, now, 0.05);
+                wbus.wideMakeup.gain.setTargetAtTime(1, now, 0.05);
+            }
+        }
+    } else {
+        for (let t = 0; t < SP6_TICKS; t++) {
+            // 6 identical setWidth/tick (the value only alternates BETWEEN ticks), so
+            // the flush proves both properties at once: 6 stamps collapse to <=1 write,
+            // and 100 alternating ticks yield ~100 events/param.
+            const w = (t & 1) ? 1 : 0.5;
+            for (let f = 0; f < SP6_FRAMES_PER_TICK; f++) sp6.audio.setWidth('wide', w);
+            sp6.audio._flushWidth();
+        }
+    }
+    let sp6Max = 0;
+    {
+        let n = 0;
+        const ev = wbus.wideWet.gain.events;
+        for (let k = 0; k < ev.length; k++) if (ev[k][0] === 'target') n++;
+        if (n > sp6Max) sp6Max = n;
+        let m = 0;
+        const ev2 = wbus.wideMakeup.gain.events;
+        for (let k = 0; k < ev2.length; k++) if (ev2[k][0] === 'target') m++;
+        if (m > sp6Max) sp6Max = m;
+    }
+    process.stderr.write('T-SP6 (d) ' + (SP6_RED ? '(RED: 60 Hz per-frame direct writer)' : '(10 Hz throttled flush)') +
+        ': max wet/makeup target events/param = ' + sp6Max + ' (cap ' + SP6_EVENT_CAP +
+        ', expected ~' + SP6_TICKS + ')\n');
+    if (!(sp6Max <= SP6_EVENT_CAP)) {
+        die('T-SP6: ' + sp6Max + ' widener target events/param exceeds the ' + SP6_EVENT_CAP +
+            ' cap -- a per-frame param writer is growing the native event list (SP-03).');
+    }
+    // Identical-value collapse: a fresh armed bus, same width every tick -> exactly 1
+    // write per param across many flushes.
+    {
+        const idBus = sp6.audio.createBus('wide2', { width: 0 });
+        // 'wide2' has no pool, but _flushWidth only touches the widener params.
+        for (let t = 0; t < 10; t++) { sp6.audio.setWidth('wide2', 0.7); sp6.audio._flushWidth(); }
+        let idN = 0;
+        const idEv = idBus.wideWet.gain.events;
+        for (let k = 0; k < idEv.length; k++) if (idEv[k][0] === 'target') idN++;
+        process.stderr.write('T-SP6 (d) identical-value collapse: ' + idN + ' target event(s) over 10 ticks (expected 1)\n');
+        if (idN !== 1) {
+            die('T-SP6: identical-value setWidth produced ' + idN + ' writes over 10 ticks (expected 1) -- ' +
+                'the flush is not gating on widthLast !== width.');
+        }
+    }
+    sp6.audio.destroy();
+
+    // (e) setWidth allocation. Scalar stamp vs retained {w} box per call.
+    const sp6a = await buildWidthEngine();
+    const scalarWidth = (i) => { sp6a.audio.setWidth('wide', (i & 1023) / 1023); };
+    const boxedWidth = (i) => { keep.push({ w: i }); sp6a.audio.setWidth('wide', (i & 1023) / 1023); };
+    const sp6Gated = SP6_ALLOC_RED ? boxedWidth : scalarWidth;
+    const sp6Row = (() => {
+        let i = 0;
+        const r = measureOps(() => sp6Gated(i++), { ops: SP6_OPS, warmup: SP6_WARMUP, source: 'gc', stabilize: true });
+        const report = checkNoGc(r.summary, RULES);
+        return {
+            label: SP6_ALLOC_RED ? 'T-SP6:ALLOC_RED' : 'T-SP6', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
+        };
+    })();
+    const sp6Control = SP6_ALLOC_RED ? sp6Row : (() => {
+        let i = 0;
+        const r = measureOps(() => boxedWidth(i++), { ops: SP6_OPS, warmup: SP6_WARMUP, source: 'gc', stabilize: true });
+        return {
+            label: 'T-SP6:control', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            major: r.summary.gc.major, maxMs: r.summary.gc.maxMs,
+        };
+    })();
+    process.stderr.write('T-SP6 (e) setWidth (500k scalar stamps vs retained {w} box per call):\n');
+    process.stderr.write(fmt(sp6Row) + '\n');
+    process.stderr.write(fmt(sp6Control) + '\n');
+    if (!(sp6Control.bytesPerOp >= SP6_CONTROL_MIN_BYTES_PER_OP)) {
+        die('T-SP6 control (retained {w} box) measured ' + sp6Control.bytesPerOp.toFixed(4) +
+            ' bytes/op, below the ' + SP6_CONTROL_MIN_BYTES_PER_OP + ' floor -- the gate cannot ' +
+            'see allocation and is not falsifiable.');
+    }
+    if (SP6_ALLOC_RED) {
+        die('SP6_ALLOC_RED: gated setWidth path is the retained-box variant (' +
+            sp6Row.bytesPerOp.toFixed(4) + ' bytes/op) -- rejecting as designed. This is the red ' +
+            'control; a clean run does not take this branch.');
+    }
+    if (!sp6Row.noMajor) {
+        die('T-SP6: ' + sp6Row.major + ' major GC / maxMs ' + sp6Row.maxMs.toFixed(3) +
+            ' violates ' + JSON.stringify(RULES));
+    }
+    if (!(sp6Row.bytesPerOp <= SP6_MAX_BYTES_PER_OP)) {
+        die('T-SP6: setWidth measured ' + sp6Row.bytesPerOp.toFixed(4) + ' bytes/op, over the ' +
+            SP6_MAX_BYTES_PER_OP + ' ceiling -- the width path is allocating on the caller frame.');
+    }
+    sp6a.audio.destroy();
+
+    // (f) build/teardown soak: destroy() must disconnect + null all 7 widener nodes.
+    const sp6Tracker = createLeakTracker({ name: 'lite-audio-width-soak' });
+    const SP6_NOOP = () => {};
+    const sp6Kept = [];
+    let sp6UndisconnectedCycles = 0;
+    for (let c = 0; c < SP6_CYCLES; c++) {
+        let cyc;
+        try {
+            cyc = await buildWidthEngine();
+        } catch (err) {
+            die('T-SP6: build cycle ' + c + ' threw (' + (err && err.message || err) + ') -- a ' +
+                'teardown that stops releasing its lite-signal nodes exhausts the shared pool.');
+        }
+        cyc.audio.setWidth('wide', 1);
+        cyc.audio._flushWidth();
+        const b = cyc.busRec;
+        // Capture the 7 nodes BEFORE destroy nulls the slots, so we can assert each was
+        // disconnected at least once.
+        const nodes = [b.wideIn, b.wideMakeup, b.wideWet, b.delayL, b.delayR, b.panL, b.panR];
+        const sentinel = { cycle: c };
+        sp6Kept.push(sentinel);
+        const witness = sp6Tracker.track(sentinel, SP6_NOOP, c);
+        cyc.audio.destroy();
+        let allDisconnected = true;
+        for (let k = 0; k < nodes.length; k++) {
+            if (!nodes[k] || nodes[k].disconnected < 1) { allDisconnected = false; break; }
+        }
+        if (!allDisconnected) sp6UndisconnectedCycles++;
+        // Untrack only on proof that destroy() nulled every widener slot.
+        if (b.wideIn === null && b.wideMakeup === null && b.wideWet === null &&
+            b.delayL === null && b.delayR === null && b.panL === null && b.panR === null) {
+            sp6Tracker.untrack(witness);
+        }
+    }
+    if (sp6Kept.length !== SP6_CYCLES) die('T-SP6: internal -- pinned ' + sp6Kept.length + ' of ' + SP6_CYCLES);
+    const sp6Leaked = sp6Tracker.size();
+    process.stderr.write('T-SP6 (f) build/teardown soak: lite-leak witnessed ' + sp6Leaked +
+        ' un-released widener bus record(s), ' + sp6UndisconnectedCycles +
+        ' cycle(s) left a widener node connected, over ' + SP6_CYCLES + ' cycles (expected 0/0)\n');
+    if (sp6UndisconnectedCycles !== 0) {
+        die('T-SP6: ' + sp6UndisconnectedCycles + ' teardown cycle(s) left a widener node connected -- ' +
+            'destroy() must disconnect all 7 widener nodes.');
+    }
+    if (sp6Leaked !== 0) {
+        die('T-SP6: lite-leak witnessed ' + sp6Leaked + ' widener bus record(s) still holding widener ' +
+            'nodes after destroy() -- a teardown leak.');
     }
 
     process.stderr.write(

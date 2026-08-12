@@ -288,6 +288,48 @@ before the first real play does, eating the first-play hitch. lite-audio never
 sets `panningModel` itself; the pool owns its spatial nodes (`^1.4.0`). Default
 stays `'stereo'` (a `StereoPanner` per voice), byte-identical to prior releases.
 
+### Stereo width (the Haas widener)
+
+```js
+audio.createBus('pad', { width: 0 });   // arm the widener, start bypassed
+// ... a mono source loaded on 'pad' ...
+audio.setWidth('pad', 0.8);             // open it up; writes ride the ~10 Hz monitor
+audio.setWidth('pad', 0);               // bit-identical bypass
+audio.widthOf('pad');                   // -> 0  (null on an unarmed/disarmed bus)
+```
+
+`{ width: 0..1 }` inserts a **mono-safe Haas widener** between the pool output and
+the bus gain: the dry (mono) signal plus a delayed, opposite-panned wet pair
+(`12 ms` hard-left, `19 ms` hard-right) summed back through an explicit makeup gain
+of `1/sqrt(1 + 4*wet^2)`, so opening the width holds total power flat at `0 dB`
+(**SP-05**) instead of getting louder as it gets wider. `setWidth(bus, w)` is a
+caller-frame method -- like `setPosition()` it does no param write and allocates
+nothing; it clamps to `[0, 1]`, stamps a target and a dirty bit, and the actual
+`wet`/`makeup` writes ride the cold `~10 Hz` monitor (at most one event per param
+per tick, only when the value moves). `width: 0` is a **bit-identical bypass**: a
+few ticks after the last move to `0` the flush snaps `wet` to *exactly* `0` and
+`makeup` to *exactly* `1` with `setValueAtTime`, because `setTargetAtTime` is
+exponential and would otherwise leave a hair of wet signal forever.
+
+There is deliberately **no boolean "on"** -- the only control is the `width: 0..1`
+knob (`0` is off), so "wide" is always a value you can automate, never a hidden
+mode. Omit `width` entirely and the bus is byte-identical to prior releases (no
+widener nodes, no new hot-path branch).
+
+> [!CAUTION]
+> **The widener is mono-source only, and it is a comb filter on a mono speaker.**
+> - **SP-04 (mono-downmix comb filtering).** A Haas pair is two short-delayed
+>   copies of the same signal. On a *single-speaker or mono* playback path they sum
+>   back together and the delays become notches -- audible comb filtering. That is
+>   lite-audio's core mobile / single-speaker audience, so budget the widener for
+>   headphone / true-stereo output and leave it at `width: 0` when you cannot tell.
+> - **SP-06 (stereo-image collapse).** The effect *synthesises* a stereo image from
+>   a mono source. Feed it a stereo asset and the channels fold and smear, so a
+>   non-mono loaded buffer **disarms** the widener at pool build (`widthRefused =
+>   'stereo-source'`, `setWidth()` becomes a no-op, warned once). And because the
+>   widener is stereo-only, `width > 0` on a `positional` / `hrtf` bus is a
+>   construction-time `RangeError` -- it does not compose with per-voice panning.
+
 ### Auto-suspend
 
 ```js
@@ -334,6 +376,19 @@ new LiteAudio({
     clearTimeout:     globalThis.clearTimeout,   // ditto
 });
 ```
+
+Per-bus options are passed to `createBus(name, opts)` (and the constructor builds
+its `buses` with the defaults):
+
+```js
+audio.createBus('pad', {
+    meter:   false,       // tap an AnalyserNode for level() readouts
+    spatial: 'stereo',    // 'stereo' | 'positional' | 'hrtf' (per-voice pan mode)
+    width:   0,           // 0..1 arms the mono-safe Haas widener; omit to leave mono
+});
+```
+
+- `width` is **omit-to-disable**: leaving it out builds no widener nodes (byte-identical to prior releases); a number in `[0, 1]` arms it and enables `setWidth()`. A non-finite / boolean / out-of-range value, or `width > 0` on a `positional`/`hrtf` bus, is a construction-time `RangeError`. A non-mono loaded source disarms it (see the Stereo width caution above).
 
 ## Migration from lite-audio-manager
 
@@ -403,6 +458,22 @@ LITEAUDIO_TORTURE_LEAK=1 node --expose-gc test/torture.mjs   # exits non-zero
 
 routes the gated path through the rejected `{bus,handle}`-object design so a pass
 means the gate can actually see allocation.
+
+The spatial roadmap adds dedicated tiers, each with a **proven red control** that
+forces the failure it guards and makes the gate exit non-zero: `T-SP1` (setPosition
+is a zero-alloc scratch stamp) / `T-SP2` (the `~10 Hz` position flush holds the
+native param-event rate under a `200`/param/voice cap) / `T-SP3` (a lite-leak
+witness proves `destroy()` releases the positional scratch across `200`
+build/teardown cycles), the S4 `T-SP5` (every voice panner reports
+`panningModel === 'HRTF'`; the `gain=0` HRIR prewarm retires with a zero live-node
+delta; released clean across `200` cycles), and the S5 `T-SP6` (the width flush
+holds the `wet`/`makeup` event rate under the same cap with identical-value writes
+collapsing to exactly `1`; `setWidth` is `<= 4 B/op` with no major GC; `destroy()`
+disconnects + nulls all `7` widener nodes across `200` cycles). Their red controls
+are `LITEAUDIO_TORTURE_SP1_RED` / `SP2_RED` / `SP3_RED` / `SP5_RED`,
+`SP6_RED` (a `60 Hz` per-frame direct param writer that blows the event cap), and
+`SP6_ALLOC_RED` (a `setWidth` that boxes into a retained object) -- each exits
+non-zero.
 
 The mock harness (`test/mock-ctx.js`) records every `AudioParam` scheduled event
 into an inspectable `.events` array **and settles `.value` on whatever the

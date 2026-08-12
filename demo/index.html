@@ -755,10 +755,11 @@
 
 <header>
     <div>
-        <h1>SIGNAL // NOISE <span>/ @zakkster/lite-audio v2.0.0 / four scenes, real traces</span></h1>
-        <p>Every phosphor trace on this page is actual signal - AnalyserNode waveforms and RMS meters read straight off
-            the engine's buses into pre-allocated Float32Arrays. Nothing here is drawn from a formula. The frame loop
-            allocates nothing; the soak bar at the bottom proves it.</p>
+        <h1>SIGNAL // NOISE <span>/ @zakkster/lite-audio v2.2.0 / five scenes, real traces</span></h1>
+        <p>Every phosphor trace on this page is actual signal - AnalyserNode waveforms, RMS meters, and the live
+            PannerNode position all read straight off the engine's buses into pre-allocated Float32Arrays. Nothing here
+            is drawn from a formula. The frame loop allocates nothing - even scene 5, which calls setPosition() every
+            frame; the soak bar at the bottom proves it.</p>
     </div>
     <div id="badge">ctx <b id="b-state">-</b> / unlocked <b id="b-unlocked">no</b> / voices <b id="b-voices">0</b> /
         heap <b id="b-heap">-</b></div>
@@ -769,6 +770,7 @@
     <button data-scene="1" aria-pressed="false">2 / bus desk</button>
     <button data-scene="2" aria-pressed="false">3 / crossfade deck</button>
     <button data-scene="3" aria-pressed="false">4 / unlock theater</button>
+    <button data-scene="4" aria-pressed="false">5 / spatial field</button>
 </nav>
 
 <!-- ============================ VOICE GRID ============================== -->
@@ -968,6 +970,65 @@
     </section>
 </main>
 
+<!-- ============================ SPATIAL FIELD ========================= -->
+<main id="deck-spatial" class="deck" hidden>
+    <section id="p-radar" class="panel">
+        <div class="panel-title"><span>spatial field / top-down, listener at origin facing -Z</span><b id="sp-az">front /
+            r 3.0</b></div>
+        <div class="screen grab">
+            <canvas id="cv-radar"></canvas>
+        </div>
+        <p class="note"><b>Headphones on.</b> A sonar source orbits your head; the engine writes its 3D position to a
+            per-voice <em>PannerNode</em> through <em>setPosition(handle, x, y, z)</em> - a zero-alloc scratch stamp on
+            this frame, flushed to the node on the shared ~10 Hz monitor. Toggle <b>equalpower</b> vs <b>HRTF</b> and
+            listen: equalpower is amplitude-panned stereo, HRTF is per-voice binaural convolution - you should hear
+            front/back and elevation, not just left/right. <b>Drag</b> the field to park the source dead-left, behind,
+            or in front and confirm each on your rig.</p>
+    </section>
+
+    <section id="p-radar-sig" class="panel">
+        <div class="panel-title"><span>live PannerNode / read off the pool, not a formula</span><b id="sp-warm">HRIR
+            -</b></div>
+        <dl class="readout">
+            <dt>panningModel</dt>
+            <dd id="sp-model">-</dd>
+            <dt>positionX / Y / Z</dt>
+            <dd id="sp-pos">- / - / -</dd>
+            <dt>live handle</dt>
+            <dd id="sp-handle">-</dd>
+            <dt>voice</dt>
+            <dd id="sp-voice">-</dd>
+        </dl>
+        <p class="note">These are the actual values on the live voice's node: <em>pool.voiceNode(handle).panningModel</em>
+            and the <em>positionX/Y/Z</em> AudioParams the monitor last wrote. When the model reads <b>HRTF</b> the
+            browser is running a head-related impulse response per voice. The prewarm badge lights once the silent
+            gain=0 HRIR voice has loaded the impulse set - so the first real orbit does not stutter.</p>
+    </section>
+
+    <section id="p-radar-ctl" class="panel">
+        <div class="panel-title"><span>field control</span><b id="sp-hint">unlock on scene 4 first</b></div>
+        <div class="row">
+            <span class="lbl">render</span>
+            <button id="b-sp-eq" aria-pressed="false">equalpower</button>
+            <button id="b-sp-hr" class="on" aria-pressed="true">HRTF (binaural)</button>
+        </div>
+        <div class="row">
+            <span class="lbl">motion</span>
+            <button id="b-sp-orbit" class="on" aria-pressed="true">orbit</button>
+            <span class="note">or drag the field to place by hand</span>
+        </div>
+        <div class="slider">
+            <label for="s-sp-speed">speed</label>
+            <input id="s-sp-speed" type="range" min="0" max="200" step="5" value="60"/>
+            <output id="o-sp-speed">0.60 rad/s</output>
+        </div>
+        <p class="note">Render mode is fixed at bus construction, so the two modes are two pre-built buses -
+            <em>createBus('spatial_eq', {spatial:'positional'})</em> and <em>createBus('spatial_hrtf', {spatial:'hrtf'})</em>
+            - sharing one motion path. The toggle stops the voice on one and re-fires on the other; the position feed
+            never changes. HRTF is headphones-only and costs a convolution per live voice - budget it.</p>
+    </section>
+</main>
+
 <!-- ============================ SHARED RACK ============================ -->
 <div class="rack">
     <section class="panel">
@@ -1010,7 +1071,7 @@
     </div>
     <div class="col">
         <h2>zero-GC gate, on the page</h2>
-        <p class="note">Switch all four scenes 100 times and read the heap delta. A demo that allocates while displaying
+        <p class="note">Switch all five scenes 100 times and read the heap delta. A demo that allocates while displaying
             a heap graph is the worst possible advertisement, so this one does not. Chrome only - needs
             <em>performance.memory</em>; run with <em>--enable-precise-memory-info</em> for a tight number. The manual
             DevTools protocol is in <a href="../DEMO-GATE.md">DEMO-GATE.md</a>.</p>
@@ -1035,8 +1096,8 @@
 {
   "imports": {
     "@zakkster/lite-audio": "../Audio.js",
-    "@zakkster/lite-signal": "https://esm.sh/@zakkster/lite-signal@^1.3.0",
-    "@zakkster/lite-audio-pool": "https://esm.sh/@zakkster/lite-audio-pool@^1.1.0"
+    "@zakkster/lite-signal": "https://esm.sh/@zakkster/lite-signal@^1.4.3",
+    "@zakkster/lite-audio-pool": "https://esm.sh/@zakkster/lite-audio-pool@^1.4.0"
   }
 }
 </script>
@@ -1055,6 +1116,14 @@
     const POOL_CAPACITY = 8;
     const QUEUE_LIMIT = 8;
 
+    // Scene 5: two pre-built spatial buses. Render mode is fixed at construction,
+    // so equalpower vs HRTF is two buses sharing one motion path - the toggle swaps
+    // which one the orbit voice sounds on; setPosition() feeds both identically.
+    const SPATIAL_EQ = 'spatial_eq', SPATIAL_HR = 'spatial_hrtf';
+    const SPATIAL_BUS = [SPATIAL_EQ, SPATIAL_HR];     // index by spatialMode
+    const SPATIAL_SOUND = ['orbit_eq', 'orbit_hr'];
+    const ORBIT_R_MAX = 5;                             // world radius mapped to the radar edge
+
     const TELEM_MASK = 0x07;               // ~7.5 Hz textContent throttle at 60fps
     const SCOPE_N = 512;                    // AnalyserNode fftSize
     const TRACE_CAP = 480, TRACE_MASK = 479;
@@ -1070,6 +1139,9 @@
         ['sting', 'sfx', synthSting, 0.9, 0.00],
         ['click', 'ui', synthClick, 0.6, 0.00],
         ['blip', 'ui', synthBlip, 0.6, 0.09],
+        // Scene 5 orbit source, one per spatial bus (same buffer, two panner modes).
+        ['orbit_eq', SPATIAL_EQ, synthOrbit, 0.85, 0.00],
+        ['orbit_hr', SPATIAL_HR, synthOrbit, 0.85, 0.00],
     ];
     // Strafe fires these, cycling, one per bus so both pools fill.
     const STRAFE_SFX = ['laser', 'hit', 'coin'];
@@ -1116,6 +1188,7 @@
         document.getElementById('deck-bus'),
         document.getElementById('deck-xfade'),
         document.getElementById('deck-unlock'),
+        document.getElementById('deck-spatial'),
     ];
 
     const $bState = document.getElementById('b-state');
@@ -1178,6 +1251,20 @@
     const $bSoak = document.getElementById('b-soak');
     const $soakOut = document.getElementById('soak-out');
 
+    // scene 5: spatial field
+    const $spAz = document.getElementById('sp-az');
+    const $spWarm = document.getElementById('sp-warm');
+    const $spModel = document.getElementById('sp-model');
+    const $spPos = document.getElementById('sp-pos');
+    const $spHandle = document.getElementById('sp-handle');
+    const $spVoice = document.getElementById('sp-voice');
+    const $spHint = document.getElementById('sp-hint');
+    const $bSpEq = document.getElementById('b-sp-eq');
+    const $bSpHr = document.getElementById('b-sp-hr');
+    const $bSpOrbit = document.getElementById('b-sp-orbit');
+    const $sSpSpeed = document.getElementById('s-sp-speed');
+    const $oSpSpeed = document.getElementById('o-sp-speed');
+
     // ==========================================================================
     // Canvas
     // ==========================================================================
@@ -1200,7 +1287,8 @@
     const cvVu = mkCanvas('cv-vu');
     const cvXfade = mkCanvas('cv-xfade');
     const cvRings = mkCanvas('cv-rings');
-    const ALL_CV = [cvGrid, cvVScope, cvDuck, cvVu, cvXfade, cvRings];
+    const cvRadar = mkCanvas('cv-radar');
+    const ALL_CV = [cvGrid, cvVScope, cvDuck, cvVu, cvXfade, cvRings, cvRadar];
     let needResize = 1;
 
     function sizeAll() {
@@ -1367,6 +1455,44 @@
             g.connect(out);
             o.start(0);
             o.stop(0.12);
+        });
+    }
+
+    // Scene 5 orbit source: a 3.2 s sonar train, one broadband ping every 0.4 s,
+    // ending in silence so a re-fire loops seamlessly. Broadband onsets give the
+    // HRTF the transients it needs to place front/back - a steady sine cannot.
+    function synthOrbit() {
+        return render(3.2, (off, out) => {
+            for (let k = 0; k < 8; k++) {
+                const at = k * 0.4;
+                // onset transient: a filtered noise tick - the localization cue.
+                const n = off.createBufferSource();
+                n.buffer = noiseBuffer(off, 0.06, 3);
+                const bp = off.createBiquadFilter();
+                bp.type = 'bandpass';
+                bp.frequency.value = 2400;
+                bp.Q.value = 0.7;
+                const ng = off.createGain();
+                ng.gain.setValueAtTime(0.5, at);
+                ng.gain.exponentialRampToValueAtTime(0.001, at + 0.05);
+                n.connect(bp);
+                bp.connect(ng);
+                ng.connect(out);
+                n.start(at);
+                // tonal body: a short downward sonar ping.
+                const o = off.createOscillator();
+                o.type = 'sine';
+                o.frequency.setValueAtTime(1320, at);
+                o.frequency.exponentialRampToValueAtTime(760, at + 0.16);
+                const g = off.createGain();
+                g.gain.setValueAtTime(0.0001, at);
+                g.gain.linearRampToValueAtTime(0.34, at + 0.006);
+                g.gain.exponentialRampToValueAtTime(0.001, at + 0.18);
+                o.connect(g);
+                g.connect(out);
+                o.start(at);
+                o.stop(at + 0.2);
+            }
         });
     }
 
@@ -1554,6 +1680,23 @@
     const vuLevel = new Float32Array(BUSES.length);
     const vuPeak = new Float32Array(BUSES.length);
 
+    // scene 5: spatial field. One live orbit voice, positioned every frame.
+    let spatialMode = 1;                 // 0 = equalpower, 1 = HRTF (the headline)
+    let spatialHandle = -1;
+    let orbiting = true;
+    let orbitAngle = 0;                  // radians, 0 = front (-Z)
+    let orbitSpeed = 0.6;                // rad/s
+    let orbitRadius = 3;                 // world units from the listener
+    let lastSpatialClock = 0;            // performance.now()/1000, animation clock
+    let dragSpatial = false;
+    let srcX = 0, srcZ = -3;             // last placed source position (world)
+    let soaking = false;                 // true only inside the soak: never fire audio
+    const TRAIL_CAP = 96, TRAIL_MASK = 95;
+    const trailX = new Float32Array(TRAIL_CAP);
+    const trailZ = new Float32Array(TRAIL_CAP);
+    let trailHead = 0;
+    let trailFill = 0;
+
     // position text cache (formatted on throttle pass, not in the frame loop)
     const posText = ['0.0 / 0.0s', '0.0 / 0.0s'];
 
@@ -1681,6 +1824,15 @@
         // Metered buses: level() reads off an AnalyserNode createBus taps.
         for (const name of BUSES) engine.createBus(name, {meter: true});
 
+        // Scene 5: two spatial buses. Same distance graph + setPosition(); only the
+        // panner's panningModel differs (equalpower vs HRTF). Kept out of BUSES so
+        // they do not clutter the grid/VU/strips, which are the music/sfx/ui scenes.
+        engine.createBus(SPATIAL_EQ, {spatial: 'positional'});
+        engine.createBus(SPATIAL_HR, {spatial: 'hrtf'});
+        spatialHandle = -1;
+        trailHead = 0;
+        trailFill = 0;
+
         attachScope();
         buildStrips();
         bindSignals();
@@ -1768,6 +1920,7 @@
             $lockState.textContent = on ? 'unlocked' : 'locked';
             $bGesture.disabled = on;
             $xfHint.textContent = on ? 'unlocked' : 'unlock on scene 4 first';
+            $spHint.textContent = on ? 'live: drag the field or let it orbit' : 'unlock on scene 4 first';
             logPush('state', 'unlocked -> ' + on);
             uPush('state', 'unlocked -> ' + on);
         }));
@@ -2262,6 +2415,163 @@
     }
 
     // ==========================================================================
+    // Spatial field (scene 5): orbiting source -> setPosition() every frame.
+    // Allocates nothing: the trail is a preallocated ring, play()/setPosition() are
+    // zero-alloc, and the only strings are built on the throttle pass.
+    // ==========================================================================
+
+    function drawSpatial() {
+        const c = cvRadar.c, w = cvRadar.w, h = cvRadar.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+        const cx = w * 0.5, cy = h * 0.5;
+        const R = Math.min(w, h) * 0.44;          // radar edge == ORBIT_R_MAX
+        const scale = R / ORBIT_R_MAX;
+
+        // Animation clock is wall time, so the field keeps moving while locked.
+        const clock = performance.now() * 0.001;
+        if (lastSpatialClock === 0) lastSpatialClock = clock;
+        const dt = clock - lastSpatialClock;
+        lastSpatialClock = clock;
+
+        // Drag overrides the orbit; otherwise advance the angle.
+        if (!dragSpatial) {
+            if (orbiting) orbitAngle += orbitSpeed * dt;
+            srcX = orbitRadius * Math.sin(orbitAngle);
+            srcZ = -orbitRadius * Math.cos(orbitAngle);
+        }
+
+        // Feed the engine: re-fire an expired voice, then stamp the position. The
+        // soak never sounds the field (play() would steal a channel per iteration).
+        const live = engine.unlocked().peek();
+        if (!soaking && live) {
+            if (spatialHandle < 0 || !engine.isPlaying(spatialHandle)) {
+                spatialHandle = engine.play(SPATIAL_SOUND[spatialMode], 0.85, 0, 1);
+            }
+            engine.setPosition(spatialHandle, srcX, 0, srcZ);
+        }
+
+        // Trail ring (zero-alloc).
+        trailX[trailHead & TRAIL_MASK] = srcX;
+        trailZ[trailHead & TRAIL_MASK] = srcZ;
+        trailHead = (trailHead + 1) | 0;
+        if (trailFill < TRAIL_CAP) trailFill++;
+
+        // Range rings + axes.
+        c.strokeStyle = C_GRID;
+        c.lineWidth = 1;
+        for (let r = 1; r <= ORBIT_R_MAX; r++) {
+            c.beginPath();
+            c.arc(cx, cy, r * scale, 0, Math.PI * 2);
+            c.stroke();
+        }
+        c.beginPath();
+        c.moveTo(cx - R, cy);
+        c.lineTo(cx + R, cy);
+        c.moveTo(cx, cy - R);
+        c.lineTo(cx, cy + R);
+        c.stroke();
+
+        // Cardinal labels (front is -Z, up).
+        c.font = FONT_M;
+        c.fillStyle = C_DIM;
+        c.textAlign = 'center';
+        c.fillText('FRONT -Z', cx, cy - R - 4);
+        c.fillText('BACK +Z', cx, cy + R + 12);
+        c.textAlign = 'right';
+        c.fillText('-X', cx - R - 5, cy + 3);
+        c.textAlign = 'left';
+        c.fillText('+X', cx + R + 5, cy + 3);
+
+        // Listener glyph: a head at the origin facing front.
+        const col = spatialMode === 1 ? C_CYAN : C_PHOS;
+        c.strokeStyle = C_INK;
+        c.lineWidth = 1.5;
+        c.beginPath();
+        c.arc(cx, cy, 9, 0, Math.PI * 2);
+        c.stroke();
+        c.fillStyle = C_INK;
+        c.beginPath();
+        c.moveTo(cx, cy - 10);
+        c.lineTo(cx - 3, cy - 5);
+        c.lineTo(cx + 3, cy - 5);
+        c.closePath();
+        c.fill();
+
+        // Trail: oldest -> newest, fading.
+        for (let k = 0; k < trailFill; k++) {
+            const idx = (trailHead - trailFill + k) & TRAIL_MASK;
+            const px = cx + trailX[idx] * scale;
+            const py = cy + trailZ[idx] * scale;
+            c.globalAlpha = ((k + 1) / trailFill) * 0.5;
+            c.fillStyle = col;
+            c.beginPath();
+            c.arc(px, py, 2, 0, Math.PI * 2);
+            c.fill();
+        }
+        c.globalAlpha = 1;
+
+        // Ray + source dot.
+        const dx = cx + srcX * scale, dy = cy + srcZ * scale;
+        c.strokeStyle = col;
+        c.globalAlpha = 0.4;
+        c.lineWidth = 1;
+        c.beginPath();
+        c.moveTo(cx, cy);
+        c.lineTo(dx, dy);
+        c.stroke();
+        c.globalAlpha = 1;
+        c.fillStyle = col;
+        c.beginPath();
+        c.arc(dx, dy, 6, 0, Math.PI * 2);
+        c.fill();
+
+        if (!live) {
+            c.fillStyle = C_AMBER;
+            c.textAlign = 'center';
+            c.fillText('unlock on scene 4 to sound the field', cx, cy + R * 0.62);
+            c.textAlign = 'left';
+        }
+    }
+
+    // Map a pointer onto the field and park the source there (drag placement).
+    function placeSpatialFromPointer(clientX, clientY) {
+        const r = cvRadar.el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) return;
+        const cx = r.width * 0.5, cy = r.height * 0.5;
+        const scale = Math.min(r.width, r.height) * 0.44 / ORBIT_R_MAX;
+        let wx = (clientX - r.left - cx) / scale;
+        let wz = (clientY - r.top - cy) / scale;
+        let d = Math.hypot(wx, wz);
+        if (d > ORBIT_R_MAX) {                     // clamp to the field edge
+            wx = wx / d * ORBIT_R_MAX;
+            wz = wz / d * ORBIT_R_MAX;
+            d = ORBIT_R_MAX;
+        }
+        if (d < 0.2) {                             // never sit exactly on the listener
+            wz = -0.2;
+            d = 0.2;
+        }
+        srcX = wx;
+        srcZ = wz;
+        orbitRadius = d;
+        orbitAngle = Math.atan2(wx, -wz);          // so a resumed orbit continues here
+    }
+
+    // Azimuth -> a cardinal word (0 deg == front, +X == right). No allocation.
+    function azLabel(x, z) {
+        const a = ((Math.atan2(x, -z) * 180 / Math.PI) % 360 + 360) % 360;
+        if (a < 23 || a >= 338) return 'front';
+        if (a < 68) return 'front-right';
+        if (a < 113) return 'right';
+        if (a < 158) return 'back-right';
+        if (a < 203) return 'back';
+        if (a < 248) return 'back-left';
+        if (a < 293) return 'left';
+        return 'front-left';
+    }
+
+    // ==========================================================================
     // Unlock theater: FSM paint + scripted interruption
     // ==========================================================================
 
@@ -2332,6 +2642,8 @@
             } else if (scene === 2) {
                 drawXfade();
                 drawRings();
+            } else if (scene === 4) {
+                drawSpatial();
             }
 
             if ((frameCount & TELEM_MASK) === 0) {
@@ -2381,6 +2693,29 @@
         }
 
         if (scene === 3) paintFsm();
+
+        if (scene === 4) {
+            // Read the ACTUAL live node off the pool - model + the position the
+            // monitor last wrote - so the panel is signal, not a restated formula.
+            const pool = engine._buses.get(SPATIAL_BUS[spatialMode])?.pool;
+            $spModel.textContent = pool && pool.panners && pool.panners[0]
+                ? pool.panners[0].panningModel : '-';
+            const node = pool ? pool.voiceNode(spatialHandle >>> 0) : null;
+            if (node && node.positionX) {
+                $spPos.textContent = node.positionX.value.toFixed(2) + ' / ' +
+                    node.positionY.value.toFixed(2) + ' / ' + node.positionZ.value.toFixed(2);
+            }
+            const dist = Math.hypot(srcX, srcZ);
+            $spAz.textContent = azLabel(srcX, srcZ) + ' / r ' + dist.toFixed(1);
+            $spHandle.textContent = spatialHandle >= 0 ? hex32(spatialHandle) : '-';
+            const playing = spatialHandle >= 0 && engine.isPlaying(spatialHandle);
+            $spVoice.textContent = playing
+                ? ('ch ' + chanOf(spatialHandle) + ' / gen ' + genOf(spatialHandle)) : 'idle';
+            const warmRec = engine._buses.get(SPATIAL_HR);
+            const warmed = warmRec ? warmRec.hrtfWarmed : false;
+            $spWarm.textContent = 'HRIR ' + (warmed ? 'prewarmed' : 'cold');
+            $spWarm.style.color = warmed ? C_PHOS : C_DIM;
+        }
 
         // Heap readout (Chrome). Reused string, no object churn.
         const mem = performance.memory;
@@ -2580,6 +2915,55 @@
 
     $bSimIos.addEventListener('click', simulateInterruption);
 
+    // ---- scene 5: spatial field ----
+    function setSpatialMode(m) {
+        if (m === spatialMode) return;
+        // Stop the voice on the old bus; the next frame re-fires on the new one at
+        // the same position, so the motion path is unbroken across the A/B.
+        if (spatialHandle >= 0) {
+            engine.stop(spatialHandle);
+            spatialHandle = -1;
+        }
+        spatialMode = m;
+        const hr = m === 1;
+        $bSpHr.classList.toggle('on', hr);
+        $bSpHr.setAttribute('aria-pressed', hr ? 'true' : 'false');
+        $bSpEq.classList.toggle('on', !hr);
+        $bSpEq.setAttribute('aria-pressed', !hr ? 'true' : 'false');
+        logPush('play', 'spatial render -> ' + (hr ? 'HRTF (binaural)' : 'equalpower'));
+    }
+
+    $bSpEq.addEventListener('click', () => setSpatialMode(0));
+    $bSpHr.addEventListener('click', () => setSpatialMode(1));
+
+    $bSpOrbit.addEventListener('click', () => {
+        orbiting = !orbiting;
+        $bSpOrbit.classList.toggle('on', orbiting);
+        $bSpOrbit.setAttribute('aria-pressed', orbiting ? 'true' : 'false');
+    });
+
+    $sSpSpeed.addEventListener('input', () => {
+        orbitSpeed = ($sSpSpeed.value | 0) / 100;
+        $oSpSpeed.textContent = orbitSpeed.toFixed(2) + ' rad/s';
+    });
+    orbitSpeed = ($sSpSpeed.value | 0) / 100;
+    $oSpSpeed.textContent = orbitSpeed.toFixed(2) + ' rad/s';
+
+    cvRadar.el.addEventListener('pointerdown', (e) => {
+        dragSpatial = true;
+        cvRadar.el.setPointerCapture(e.pointerId);
+        placeSpatialFromPointer(e.clientX, e.clientY);
+    });
+    cvRadar.el.addEventListener('pointermove', (e) => {
+        if (dragSpatial) placeSpatialFromPointer(e.clientX, e.clientY);
+    });
+    cvRadar.el.addEventListener('pointerup', () => {
+        dragSpatial = false;
+    });
+    cvRadar.el.addEventListener('pointercancel', () => {
+        dragSpatial = false;
+    });
+
     // ---- shared ----
     $bStopAll.addEventListener('click', () => {
         engine.stopAll();
@@ -2604,19 +2988,20 @@
         $bMigrate.setAttribute('aria-pressed', open ? 'true' : 'false');
     });
 
-    // Soak: switch all four scenes 100 times, read the heap delta. Because nothing
+    // Soak: switch all five scenes 100 times, read the heap delta. Because nothing
     // is allocated on a scene switch (no analysers or listeners are created here),
     // this should hold flat. See DEMO-GATE.md for the DevTools protocol.
     $bSoak.addEventListener('click', async () => {
         if (!engine) return;
         $bSoak.disabled = true;
+        soaking = true;                 // scene 5 draws its field but never sounds it
         const mem = performance.memory;
         const before = mem ? mem.usedJSHeapSize : 0;
         const startScene = scene;
         $soakOut.className = '';
         $soakOut.textContent = 'running...';
         for (let n = 0; n < 100; n++) {
-            for (let s = 0; s < 4; s++) {
+            for (let s = 0; s < 5; s++) {
                 selectScene(s);
                 sizeAll();
                 needResize = 0;
@@ -2633,8 +3018,10 @@
                         sampleXfade();
                         drawXfade();
                         drawRings();
-                    } else {
+                    } else if (s === 3) {
                         paintFsm();
+                    } else {
+                        drawSpatial();
                     }
                 }
             }
@@ -2644,13 +3031,14 @@
             }
         }
         selectScene(startScene);
+        soaking = false;
         const after = mem ? mem.usedJSHeapSize : 0;
         if (mem) {
             const delta = (after - before) / 1024;
-            $soakOut.textContent = '400 switches / heap delta ' + (delta >= 0 ? '+' : '') + delta.toFixed(0) + ' KB';
+            $soakOut.textContent = '500 switches / heap delta ' + (delta >= 0 ? '+' : '') + delta.toFixed(0) + ' KB';
             $soakOut.className = Math.abs(delta) > 1024 ? 'warn' : '';
         } else {
-            $soakOut.textContent = '400 switches done (no performance.memory - use DevTools)';
+            $soakOut.textContent = '500 switches done (no performance.memory - use DevTools)';
         }
         $bSoak.disabled = false;
     });

@@ -9,10 +9,14 @@ version. The gate is reproducible by hand in a few minutes.
 The two claims:
 
 1. **Every scene's frame loop allocates nothing.** No object, array, closure, or
-   string is created per animation frame.
+   string is created per animation frame. This includes scene 5, whose orbiting
+   source calls `setPosition(handle, x, y, z)` every frame - a zero-alloc scratch
+   stamp on the caller frame (the PannerNode writes ride the shared ~10 Hz
+   monitor), and whose trail is a preallocated ring, not a per-frame array.
 2. **Switching scenes allocates nothing.** No AnalyserNode, listener, or DOM node
-   is created when you move between the four scenes, so a page left running does
-   not climb.
+   is created when you move between the five scenes, so a page left running does
+   not climb. The two spatial buses (scene 5) are built once at engine boot, not
+   on a switch.
 
 ## Why it holds by construction
 
@@ -39,8 +43,10 @@ protocol below should both read flat.
    Without the flag `performance.memory` is bucketed to ~5 MB and the delta is
    noise; the button still runs but reports a coarse number.
 2. Serve and open the page (see below), boot the engine.
-3. Click **run soak (100 x switch)** in the footer. It selects all four scenes
-   100 times (400 switches), drawing each once, and reports the used-heap delta.
+3. Click **run soak (100 x switch)** in the footer. It selects all five scenes
+   100 times (500 switches), drawing each once, and reports the used-heap delta.
+   The soak draws scene 5's field but never sounds it (a per-iteration play() would
+   steal a channel), so the alloc reading is not polluted by voice churn.
 4. Expect a delta within a few hundred KB - dominated by the throttled log
    strings and GC timing, not by the loop. The readout turns red past 1 MB.
 
@@ -50,7 +56,8 @@ The soak button is a smoke test. The authoritative check is a DevTools heap
 profile, which is not fooled by `performance.memory` bucketing:
 
 1. Open the page, boot the engine, unlock on scene 4, start a track on scene 3,
-   and strafe scene 1 so voices are live - the loop should be doing real work.
+   strafe scene 1 so voices are live, and let scene 5 orbit an HRTF voice - the
+   loop should be doing real work, including a per-frame `setPosition()`.
 2. DevTools -> **Performance** -> record ~15 s while leaving one scene animating.
    In the **JS Heap** track, the sawtooth should be shallow and flat-topped: a
    rising baseline is a per-frame allocation leak.
@@ -58,7 +65,7 @@ profile, which is not fooled by `performance.memory` bucketing:
    while switching scenes repeatedly. Blue allocation bars should appear only at
    the throttle interval (the log strings), never once per frame and never on the
    switch itself.
-4. Take a heap snapshot, switch all four scenes ~50 times, force GC (the trash
+4. Take a heap snapshot, switch all five scenes ~50 times, force GC (the trash
    icon), take a second snapshot, and compare. Retained size should be flat and
    no detached `AnalyserNode` or `AudioNode` should appear in the delta.
 

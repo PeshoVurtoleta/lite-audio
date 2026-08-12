@@ -267,6 +267,27 @@ a `RangeError` rather than issuing colliding handles. `{ meter: true }` taps an
 bus — zero allocation per read. An unmetered bus allocates no analyser and
 `level()` returns `null`. See `decisions/0006-dynamic-bus.md`.
 
+### Spatial buses: positional and HRTF
+
+```js
+audio.createBus('world', { spatial: 'positional' });  // PannerNode per voice
+audio.createBus('binaural', { spatial: 'hrtf' });      // + panningModel 'HRTF'
+const h = audio.play('footstep');
+audio.setPosition(h, x, y, z);   // caller-frame safe; writes ride the ~10 Hz monitor
+```
+
+`{ spatial: 'positional' }` builds a `PannerNode` per voice and enables
+`setPosition(handle, x, y, z)` -- a caller-frame method that only stamps a
+pre-allocated scratch buffer (the actual `positionX/Y/Z` writes ride the cold
+`~10 Hz` monitor). `{ spatial: 'hrtf' }` is the same distance graph but the pool
+sets `panningModel = 'HRTF'` for per-voice binaural convolution. It is
+**headphones-only** -- a stereo speaker layout hears no benefit and still pays the
+per-voice HRTF convolution CPU -- and an `'hrtf'` bus fires one silent `gain=0`
+**HRIR prewarm** voice post-unlock so the browser loads its impulse-response set
+before the first real play does, eating the first-play hitch. lite-audio never
+sets `panningModel` itself; the pool owns its spatial nodes (`^1.4.0`). Default
+stays `'stereo'` (a `StereoPanner` per voice), byte-identical to prior releases.
+
 ### Auto-suspend
 
 ```js

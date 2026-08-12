@@ -218,6 +218,11 @@ export function createMockContext({ sampleRate = 44100, state = 'suspended' } = 
     let currentTime = 0;
     let ctxState = state;
     const listeners = new Map();  // event -> Set<listener>
+    // Every BufferSource this context hands out, in creation order. A source is
+    // "live" once start() stamped it and stop() has not: the census hook below
+    // counts those, which is how the HRTF prewarm tier proves the silent voice was
+    // actually retired (no leaked live node) rather than merely un-referenced.
+    const sources = [];
 
     // Emit statechange to listeners
     function fireStatechange() {
@@ -238,7 +243,7 @@ export function createMockContext({ sampleRate = 44100, state = 'suspended' } = 
         createGain: () => mockGain(),
         createStereoPanner: () => mockPanner(),
         createPanner: () => mockPanner3D(),
-        createBufferSource: () => mockBufferSource(),
+        createBufferSource: () => { const n = mockBufferSource(); sources.push(n); return n; },
         createBuffer: (ch, len, sr) => mockAudioBuffer(ch, len, sr),
         createMediaElementSource: (el) => mockMediaElementSource(el),
         createAnalyser: () => mockAnalyser(),
@@ -305,6 +310,19 @@ export function createMockContext({ sampleRate = 44100, state = 'suspended' } = 
         /** Registered statechange listener count (introspection for tests). */
         _statechangeListenerCount() {
             return listeners.get('statechange')?.size || 0;
+        },
+
+        /**
+         * Count of BufferSource nodes that were start()ed but not yet stop()ped --
+         * the live source-node census. Zero-alloc scan over the creation log.
+         */
+        _liveNodes() {
+            let n = 0;
+            for (let i = 0; i < sources.length; i++) {
+                const s = sources[i];
+                if (s.started !== null && s.stopped === null) n++;
+            }
+            return n;
         },
     };
     return ctx;

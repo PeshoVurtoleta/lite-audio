@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.2.0
+
+HRTF spatial bus, session S4 of the spatial roadmap (closes SP-07). A bus can
+now be built in binaural per-voice mode, and its head-related impulse-response
+set is prewarmed with a silent voice so the first real play does not stutter.
+
+Additive and default-off: existing `'stereo'` and `'positional'` buses are
+byte-for-byte unchanged. The hot `play()` and `setPosition()` paths gain zero
+new branches -- `'hrtf'` is positional-family, so the `'positional' || 'hrtf'`
+OR collapses ONCE at cold bus construction into a derived `positional` boolean
+that every existing per-frame site reads instead of re-testing the string.
+lite-audio never sets `panningModel` itself: the pool owns its spatial nodes and
+their teardown (Route-A), and `{ panner: 'hrtf' }` passes straight through.
+
+### Added
+
+- `createBus(name, { spatial: 'hrtf' })` -- positional-family (same `PannerNode`
+  distance graph and `setPosition()` as `'positional'`) but the pool sets
+  `panningModel = 'HRTF'` for per-voice binaural convolution. Headphones-only (a
+  stereo speaker layout hears no benefit and still pays the CPU), and each live
+  HRTF voice costs a per-voice HRTF convolution -- budget accordingly. An unknown
+  `spatial` value still fails closed with a did-you-mean.
+- Silent HRIR prewarm: an `'hrtf'` bus fires one `gain=0` voice through the pool
+  post-unlock (or at pool build when the context is already unlocked), so the
+  browser loads the HRTF impulse-response set ahead of the first audible play and
+  the first shot does not stutter. Latched by handle so it fires exactly once per
+  bus; retired on the next `~10 Hz` monitor tick, ahead of the duck follower /
+  meter sweep / auto-suspend check, so no user-facing mix logic ever observes it
+  as "something playing". `destroy()` nulls the prewarm handle (null, not zero).
+
+### Changed
+
+- `peerDependencies["@zakkster/lite-audio-pool"]` widened `^1.2.0` -> `^1.4.0`
+  (v1.4.0 adds the `panner: 'hrtf'` mode this bus routes through).
+
+### Testing
+
+- New torture tier `T-SP5`: every voice panner across capacity reports
+  `panningModel === 'HRTF'`; the prewarm voice retires on the monitor tick with
+  `activeCount() === 0` and a zero live-source-node census delta; and a lite-leak
+  witness proves `destroy()` releases the hrtf bus across 200 build/teardown
+  cycles. Ships a proven red control -- `LITEAUDIO_TORTURE_SP5_RED=1` disables the
+  retire so the gain=0 voice leaks a live node and the gate exits non-zero.
+
 ## 2.1.0
 
 Positional audio, session S3 of the spatial roadmap (closes SP-01, SP-03,

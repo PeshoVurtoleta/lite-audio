@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.1.0';
+export const VERSION = '2.2.0';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -434,11 +434,14 @@ export class LiteAudio {
      * @param {string} name
      * @param {Object} [opts]
      * @param {boolean} [opts.meter] - tap an AnalyserNode for level() readouts.
-     * @param {'stereo'|'positional'} [opts.spatial] - per-voice pan mode. Decided
-     *   here at CONSTRUCTION (cold) and captured into the pool's `panner` option;
-     *   play() never re-tests it. Defaults to 'stereo' (byte-identical to prior
-     *   releases: a StereoPanner per voice, equalpower). 'positional' builds a
-     *   PannerNode per voice and enables setPosition(). An unknown value is a
+     * @param {'stereo'|'positional'|'hrtf'} [opts.spatial] - per-voice pan mode.
+     *   Decided here at CONSTRUCTION (cold) and captured into the pool's `panner`
+     *   option; play() never re-tests it. Defaults to 'stereo' (byte-identical to
+     *   prior releases: a StereoPanner per voice, equalpower). 'positional' builds a
+     *   PannerNode per voice and enables setPosition(). 'hrtf' is positional-family
+     *   (same distance graph + setPosition()) but the pool sets the PannerNode's
+     *   panningModel to 'HRTF' for per-voice binaural convolution -- headphones-only,
+     *   higher CPU; an HRIR prewarm eats the first-play hitch. An unknown value is a
      *   wiring error and fails closed with a did-you-mean, never a silent ignore.
      * @returns {Object} the bus record.
      */
@@ -447,10 +450,10 @@ export class LiteAudio {
         // an unknown value throws with a hint rather than silently degrading to
         // stereo, so a typo surfaces at createBus() and not as silent flat audio.
         const spatial = opts.spatial ?? 'stereo';
-        if (spatial !== 'stereo' && spatial !== 'positional') {
+        if (spatial !== 'stereo' && spatial !== 'positional' && spatial !== 'hrtf') {
             throw new RangeError(
                 'LiteAudio: createBus("' + name + '") got unknown spatial "' + spatial +
-                '" -- expected "stereo" or "positional".'
+                '" -- expected stereo, positional or hrtf.'
             );
         }
 
@@ -494,9 +497,24 @@ export class LiteAudio {
             //                                  stamped each slot (steal-safety key)
             //   posDirty Uint32Array bitset  - which channels need a flush
             spatial,
+            // 'hrtf' is positional-FAMILY: the OR collapses ONCE here (cold) into a
+            // derived boolean every hot/monitor site reads instead of re-testing the
+            // string. The only behavioural difference vs 'positional' is the pool's
+            // panningModel, which the pool owns (Route-A) -- lite-audio never sets it.
+            positional: spatial === 'positional' || spatial === 'hrtf',
             posXYZ: null,
             posOwner: null,
             posDirty: null,
+            // HRIR prewarm (SP-07). An 'hrtf' bus fires one gain=0 voice through the
+            // pool POST-unlock so the browser loads the HRTF impulse-response set
+            // before the first real play (eating the first-play hitch). Latched by
+            // handle so it fires exactly once; retired on the next monitor tick.
+            // Null (not zero) is the "no live prewarm" state -- a torn-down bus must
+            // never carry a stale handle. hrtfWarmPending counts monitor ticks until
+            // retire (armed to 1 -> retired on the next tick, no wall-clock read).
+            hrtfWarmHandle: null,
+            hrtfWarmed: false,
+            hrtfWarmPending: 0,
         };
         this._buses.set(name, busRec);
         this._busList.push(busRec);
@@ -504,7 +522,8 @@ export class LiteAudio {
         // A positional bus writes position on the shared monitor tick, so it must
         // ensure the monitor is armed even if no meter/duck/auto-suspend did.
         // _startMonitor() is idempotent-guarded, so this is a no-op if already up.
-        if (spatial === 'positional') this._startMonitor();
+        // Reads the derived positional flag so 'hrtf' (positional-family) arms it too.
+        if (busRec.positional) this._startMonitor();
         return busRec;
     }
 
@@ -544,6 +563,12 @@ export class LiteAudio {
                 this._sCtxState.set(ctx.state);
             });
             this._unlockAbort.abort();
+            // Prewarm every hrtf bus whose pool was already built before the gesture.
+            // Fired POST-unlock (the pool voice needs a running context) and BEFORE
+            // the queue flush so the silent HRIR load starts ahead of the first real
+            // play. The hrtfWarmed latch makes it fire exactly once per bus across
+            // this site and the pool-build site.
+            for (let i = 0; i < this._busList.length; i++) this._prewarmHrtf(this._busList[i]);
             this._flushQueue();
         };
 
@@ -649,7 +674,7 @@ export class LiteAudio {
                 this._ctx, dummyBuffer, spriteMap, this._poolCapacity, busRec.gain,
                 { panner: busRec.spatial }
             );
-            if (busRec.spatial === 'positional') {
+            if (busRec.positional) {
                 const cap = this._poolCapacity;
                 if (busRec.posXYZ === null) {
                     busRec.posXYZ = new Float32Array(cap * 3);
@@ -661,6 +686,10 @@ export class LiteAudio {
                     busRec.posDirty.fill(0);
                 }
             }
+            // Prewarm the HRIR set if the context is ALREADY unlocked at pool build
+            // (a defineSounds/createBus that arrives after the user gesture). The
+            // hrtfWarmed latch makes this idempotent with the unlock-transition site.
+            this._prewarmHrtf(busRec);
         }
 
         // Flush the queue in case sounds arrived after the user gesture:
@@ -1639,6 +1668,15 @@ export class LiteAudio {
             this._monitorTick = () => {
                 this._monitorTimer = null;
                 if (this._destroyed) return;
+                // Retire any HRIR prewarm voice FIRST, before the duck follower, the
+                // meter sweep or the auto-suspend check reads activeCount(). The
+                // prewarm voice is armed OUTSIDE the tick (at unlock / pool build), so
+                // by retiring it at the head of the very next tick no user-facing
+                // mix logic ever observes it as "something playing": no duck flicker,
+                // no delayed auto-suspend. This is the deliberate resolution of the
+                // planner's risk -- the voice is retired fast rather than special-
+                // cased out of activeCount, keeping the hot accounting path untouched.
+                this._retireHrtfWarm();
                 this._evalDuckRules();
                 this._sweepMeters();
                 this._flushPositions();
@@ -1794,6 +1832,71 @@ export class LiteAudio {
         if (p && typeof p.catch === 'function') p.catch(() => {});
     }
 
+    // ---------- HRTF prewarm (SP-07) ---------------------------------------
+
+    /**
+     * Prewarm the HRIR (head-related impulse-response) set for an 'hrtf' bus by
+     * playing ONE silent (gain=0) voice through the pool. A browser loads the
+     * per-voice HRTF convolution kernels lazily on the first HRTF PannerNode that
+     * sounds, so the first REAL play would otherwise stutter while the set loads;
+     * this eats that hitch up front. Cold path: called at the unlock transition
+     * and at pool build, never on a hot frame.
+     *
+     * Fires at most ONCE per bus -- the hrtfWarmed latch is the idempotence key
+     * across both call sites. Fail closed at every gate: not an hrtf bus, no pool,
+     * a still-locked context, or already warmed -> no-op; a play() that returns a
+     * skip sentinel (< 0) leaves the latch CLEAR (null, not zero) so the next pool
+     * build retries. lite-audio NEVER sets panningModel here -- the pool owns its
+     * spatial nodes (Route-A); this only routes a silent voice through it.
+     * @param {Object} busRec
+     */
+    _prewarmHrtf(busRec) {
+        if (busRec.spatial !== 'hrtf') return;
+        if (busRec.pool === null) return;
+        if (!this._sUnlocked.peek()) return;          // needs a running context
+        if (busRec.hrtfWarmed) return;                // fire exactly once per bus
+        // Find a ready sound routed to THIS bus to name the pool voice. Cold lookup
+        // (once per bus over its whole life), so the Map iterator is acceptable here.
+        let soundId = null;
+        for (const [id, rec] of this._sounds) {
+            if (rec.loadState.peek() === 'ready' && this._buses.get(rec.busName) === busRec) {
+                soundId = id;
+                break;
+            }
+        }
+        if (soundId === null) return;                 // nothing loaded yet: retry next build
+        const handle = this.play(soundId, 0, 0, 1);   // gain=0 silent prewarm voice
+        if (handle < 0) return;                       // fail closed, no latch: retry next build
+        busRec.hrtfWarmHandle = handle;
+        busRec.hrtfWarmed = true;
+        busRec.hrtfWarmPending = 1;                   // retire on the NEXT monitor tick
+        this._startMonitor();                         // ensure a tick fires to retire it
+    }
+
+    /**
+     * Retire HRIR prewarm voices on the monitor tick. A prewarm voice is armed
+     * with hrtfWarmPending = 1 OUTSIDE the tick; the first tick after arming
+     * decrements it to 0 and stops the voice, giving the browser up to one full
+     * monitor interval (~100 ms) with a live HRTF PannerNode to load its kernels.
+     * No wall-clock read -- the pending counter IS the latch. Null (not zero) the
+     * handle after stop so a stale handle can never be double-stopped. Allocation-
+     * free: indexed loop, and non-hrtf buses fall through on the null-handle guard.
+     */
+    _retireHrtfWarm() {
+        const list = this._busList;
+        for (let b = 0; b < list.length; b++) {
+            const busRec = list[b];
+            if (busRec.hrtfWarmHandle === null) continue;   // no live prewarm on this bus
+            if (busRec.hrtfWarmPending > 0) {
+                busRec.hrtfWarmPending--;
+                if (busRec.hrtfWarmPending > 0) continue;   // still within the load window
+            }
+            this.stop(busRec.hrtfWarmHandle);
+            busRec.hrtfWarmHandle = null;                   // null, not zero
+            busRec.hrtfWarmPending = 0;
+        }
+    }
+
     /**
      * Attach an AnalyserNode to a bus for level() metering. Taps duckGain (post
      * volume, mute AND duck) so the meter reads what actually reaches master.
@@ -1878,6 +1981,11 @@ export class LiteAudio {
             busRec.posXYZ = null;
             busRec.posOwner = null;
             busRec.posDirty = null;
+            // Drop any live HRIR prewarm handle (SP-07). Null, not zero: the pool
+            // above was already destroyed, so the retire tick must never try to stop
+            // a handle into a torn-down pool.
+            busRec.hrtfWarmHandle = null;
+            busRec.hrtfWarmPending = 0;
         }
 
         // Tear down every track: cancel pending pause, remove element handlers,

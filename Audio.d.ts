@@ -115,9 +115,13 @@ export interface CreateBusOptions {
      * Per-voice pan mode, decided at bus construction and captured into the
      * pool. Default 'stereo' (a StereoPanner per voice, equalpower, byte-identical
      * to prior releases). 'positional' builds a PannerNode per voice and enables
-     * setPosition(). An unknown value fails closed (RangeError).
+     * setPosition(). 'hrtf' is positional-family (same distance graph +
+     * setPosition()) but the pool sets panningModel='HRTF' for per-voice binaural
+     * convolution -- headphones-only, higher CPU; a silent HRIR prewarm fires
+     * post-unlock to eat the first-play hitch. An unknown value fails closed
+     * (RangeError).
      */
-    spatial?: 'stereo' | 'positional';
+    spatial?: 'stereo' | 'positional' | 'hrtf';
 }
 
 export interface AutoSuspendOptions {

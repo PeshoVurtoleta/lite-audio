@@ -171,9 +171,37 @@ const SP2_RED_HZ = 60;
 const SP3_CYCLES = 200;          // build/teardown a fresh positional engine N times
 const SP3_VOICES = 8;            // voices played + positioned each cycle
 
+// T-SP5 (S4): the HRTF spatial bus + HRIR prewarm. (a) every voice panner across
+// capacity reports panningModel==='HRTF'; (b) the gain=0 prewarm voice retires on
+// the monitor tick -> activeCount()===0 AND the live source-node census returns to
+// its pre-prewarm baseline (no leaked live node); (c) a build/teardown soak leaves
+// the lite-leak witness at 0 (destroy() nulls hrtfWarmHandle + the positional
+// scratch). The census uses a state:'running' context so unlock fires the prewarm
+// at pool build WITHOUT the silent iOS unlock pulse (a mock source that never
+// stops), keeping the delta an honest measure of the prewarm voice alone.
+const SP5_VOICES = 8;             // pool capacity; every channel's panner is checked
+const SP5_CYCLES = 200;          // build/teardown a fresh hrtf engine N times
+
+// setPosition() never branches on 'positional' vs 'hrtf' -- both set
+// busRec.positional=true and share the exact same posXYZ/posOwner/posDirty
+// scratch-stamp code T-SP1 measures on a positional bus. That single code path
+// is what makes "same handle semantics" true, but a shared code path is not
+// itself proof: this measures setPosition's allocation INDEPENDENTLY against a
+// REAL hrtf-bus voice, so the S4 claim carries its own figure instead of being
+// inferred from T-SP1. The ceiling is tighter than T-SP1's (0.05 vs 4.0): this
+// is the identical zero-alloc scalar stamp, so a looser bound here would hide
+// a regression T-SP1 alone would not catch on this bus family.
+const SP5_POS_OPS = 500_000;
+const SP5_POS_WARMUP = 50_000;
+const SP5_POS_MAX_BYTES_PER_OP = 0.05;
+
 const LEAK = process.env.LITEAUDIO_TORTURE_LEAK === '1';
 const SP1_RED = process.env.LITEAUDIO_TORTURE_SP1_RED === '1';
 const SP2_RED = process.env.LITEAUDIO_TORTURE_SP2_RED === '1';
+// The red control disables the prewarm retire, so the gain=0 voice stays live: the
+// census then witnesses a leaked live source node (and activeCount stays 1) and the
+// gate must reject. Proves the retire path is load-bearing, not decorative.
+const SP5_RED = process.env.LITEAUDIO_TORTURE_SP5_RED === '1';
 // The red control suppresses the release-proof untrack, so the witness never
 // settles to 0 even though teardown ran -- modelling a destroy() that stopped
 // releasing the scratch. The gate must reject.
@@ -338,6 +366,41 @@ async function buildSpatialEngine(voices) {
         die('spatial setup: world bus is not positional (voiceNode lacks positionX)');
     }
     return { audio, ctx, handles };
+}
+
+// --- S4 HRTF engine builder --------------------------------------------------
+
+/**
+ * Build a live LiteAudio (mock context) with ONE hrtf bus, sound loaded, ready to
+ * prewarm. The context starts 'running' so init() marks it unlocked and the pool
+ * build fires _prewarmHrtf WITHOUT the iOS silent-buffer unlock pulse -- that pulse
+ * is a mock source that never stops, and it would confound the live-node census.
+ * `redRetire` swaps _retireHrtfWarm for a no-op BEFORE the prewarm arms, modelling a
+ * retire that never runs. Returns the engine, its context, and the pre-prewarm
+ * live-node baseline captured after the bus exists but before any voice sounds.
+ */
+async function buildHrtfEngine(voices, redRetire) {
+    const ctx = createMockContext({ state: 'running' });
+    const win = {
+        navigator: { userAgent: 'node-torture-gate', maxTouchPoints: 0 },
+        addEventListener: () => {},
+        removeEventListener: () => {},
+    };
+    const audio = new LiteAudio({
+        poolCapacity: voices,
+        window: win,
+        document: mockDocument(),
+        fetch: mockFetch({ '/s.wav': 500 }),
+        setTimeout: () => 0,
+        clearTimeout: () => {},
+    });
+    await audio.init(ctx);                    // state 'running' -> unlocked
+    audio.createBus('spatial', { spatial: 'hrtf' });
+    const baseline = ctx._liveNodes();        // no voice has sounded yet
+    if (redRetire) audio._retireHrtfWarm = () => {};   // never retire (red control)
+    await audio.defineSounds({ ping: { src: ['/s.wav'], bus: 'spatial' } });
+    await flushMicrotasks(8);                 // pool build fires the prewarm
+    return { audio, ctx, baseline };
 }
 
 // --- gate --------------------------------------------------------------------
@@ -628,6 +691,136 @@ async function main() {
             'gate cannot see.');
     }
 
+    // 9) T-SP5 (S4): HRTF spatial bus + HRIR prewarm.
+    //    (a) every voice panner across capacity is an HRTF PannerNode (0 exceptions);
+    //    (b) the gain=0 prewarm voice retires on the monitor tick -> activeCount 0
+    //        and the live source-node census returns to its pre-prewarm baseline;
+    //    (c) SP5_CYCLES build/teardown cycles leave the lite-leak witness at 0.
+    //    The red control (SP5_RED) disables the retire so the voice stays live and
+    //    the census rejects.
+    const hrtf = await buildHrtfEngine(SP5_VOICES, SP5_RED);
+    const hpool = hrtf.audio._buses.get('spatial').pool;
+
+    // (a) Panner model census -- read the pool's per-channel panners directly, so a
+    //     single stereo-by-accident voice among the capacity fails loud.
+    let nonHrtf = 0;
+    for (let i = 0; i < SP5_VOICES; i++) {
+        const p = hpool.panners[i];
+        if (!p || p.panningModel !== 'HRTF') nonHrtf++;
+    }
+    process.stderr.write('T-SP5 (a) panner census: ' + (SP5_VOICES - nonHrtf) + '/' + SP5_VOICES +
+        ' voice panners report panningModel===HRTF\n');
+    if (nonHrtf !== 0) {
+        die('T-SP5: ' + nonHrtf + ' of ' + SP5_VOICES + ' hrtf-bus voice panners are NOT HRTF -- ' +
+            'the pool did not receive panner:"hrtf", or lite-audio collapsed the mode wrong.');
+    }
+
+    // (b) Prewarm arm -> retire census. The prewarm fired at pool build (running
+    //     ctx, no unlock pulse), so a gain=0 voice is live now.
+    const armedActive = hrtf.audio.activeCount('spatial');
+    const armedLive = hrtf.ctx._liveNodes();
+    if (armedActive < 1) {
+        die('T-SP5: the HRIR prewarm never armed -- activeCount("spatial") is ' + armedActive +
+            ' after pool build on an unlocked context (expected the gain=0 voice).');
+    }
+    hrtf.audio._retireHrtfWarm();                  // the monitor tick's retire step
+    const afterActive = hrtf.audio.activeCount('spatial');
+    const afterLive = hrtf.ctx._liveNodes();
+    const liveDelta = afterLive - hrtf.baseline;
+    process.stderr.write('T-SP5 (b) prewarm ' + (SP5_RED ? '(RED: retire disabled)' : '(retire on tick)') +
+        ': armed active=' + armedActive + ' live=' + armedLive +
+        ' -> after active=' + afterActive + ' live=' + afterLive +
+        ' (baseline ' + hrtf.baseline + ', delta ' + liveDelta + ')\n');
+    // The RED control (retire disabled) is gated on the MEASURED census below, not
+    // on the env flag itself: SP5_RED arms the prewarm and then skips the retire,
+    // so afterActive stays at the armed value and liveDelta stays >= 1 -- the same
+    // two assertions the green path relies on now catch the red path FOR THE
+    // ACTUAL REASON (a leaked live node), not because a flag was read. A red
+    // control that dies on its own flag can never prove the assertion it claims to
+    // guard; gating on the measurement means a future regression that silently
+    // fixes the "disabled retire" case (so it stops leaking) would flip this red
+    // run to green too -- which is the correct, falsifiable behaviour.
+    if (afterActive !== 0) {
+        die('T-SP5: after retire activeCount("spatial") is ' + afterActive + ' (expected 0) -- ' +
+            'the prewarm voice was not stopped' + (SP5_RED ? ' (SP5_RED: retire disabled, as designed)' : '') + '.');
+    }
+    if (liveDelta !== 0) {
+        die('T-SP5: after retire the live source-node census is ' + afterLive + ' vs baseline ' +
+            hrtf.baseline + ' (delta ' + liveDelta + ') -- the prewarm leaked a live node' +
+            (SP5_RED ? ' (SP5_RED: retire disabled, as designed)' : '') + '.');
+    }
+    // If SP5_RED was requested but the measured census came back clean anyway, the
+    // control itself is broken (it is no longer exercising the leak it claims to
+    // model) -- that is a FAIL in its own right, not a silent pass-through.
+    if (SP5_RED) {
+        die('SP5_RED: retire was disabled but the measured census still came back clean ' +
+            '(activeCount ' + afterActive + ', live-node delta ' + liveDelta + ') -- the red ' +
+            'control is no longer modelling a leak and cannot prove this gate is falsifiable.');
+    }
+    // (b.5) setPosition allocation on this same hrtf bus, measured independently
+    //     of T-SP1 (which only ever exercises a 'positional' bus). The prewarm
+    //     channel is free now (retired above), so this plays one real voice and
+    //     stamps its position SP5_POS_OPS times.
+    const hrtfPosHandle = hrtf.audio.play('ping', 1, 0, 1);
+    if (hrtfPosHandle < 0) die('T-SP5: setPosition-allocation setup: play returned a skip sentinel');
+    const hrtfPosRow = (() => {
+        let i = 0;
+        const writer = (n) => { hrtf.audio.setPosition(hrtfPosHandle, n, n + 1, n - 1); };
+        const r = measureOps(() => writer(i++), { ops: SP5_POS_OPS, warmup: SP5_POS_WARMUP, source: 'gc', stabilize: true });
+        const report = checkNoGc(r.summary, RULES);
+        return {
+            label: 'T-SP5:setPosition', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
+        };
+    })();
+    process.stderr.write('T-SP5 (b.5) setPosition on an hrtf bus (' + SP5_POS_OPS + ' scalar stamps):\n');
+    process.stderr.write(fmt(hrtfPosRow) + '\n');
+    if (!hrtfPosRow.noMajor) {
+        die('T-SP5: setPosition (hrtf bus) ' + hrtfPosRow.major + ' major GC / maxMs ' +
+            hrtfPosRow.maxMs.toFixed(3) + ' violates ' + JSON.stringify(RULES));
+    }
+    if (!(hrtfPosRow.bytesPerOp <= SP5_POS_MAX_BYTES_PER_OP)) {
+        die('T-SP5: setPosition on an hrtf bus measured ' + hrtfPosRow.bytesPerOp.toFixed(4) +
+            ' bytes/op, over the ' + SP5_POS_MAX_BYTES_PER_OP + ' ceiling -- the hrtf-bus position ' +
+            'path is allocating on the caller frame.');
+    }
+    hrtf.audio.destroy();
+
+    // (c) Build/teardown soak: a fresh hrtf engine each cycle prewarms + retires,
+    //     then destroy() must null hrtfWarmHandle AND the positional scratch. A
+    //     lite-leak witness is untracked ONLY on that proof, so a teardown that
+    //     stops releasing leaves the ledger nonzero.
+    const sp5Tracker = createLeakTracker({ name: 'lite-audio-hrtf-soak' });
+    const SP5_NOOP = () => {};
+    const sp5Kept = [];
+    for (let c = 0; c < SP5_CYCLES; c++) {
+        let cyc;
+        try {
+            cyc = await buildHrtfEngine(SP5_VOICES, false);
+        } catch (err) {
+            die('T-SP5: build cycle ' + c + ' threw (' + (err && err.message || err) + ') -- a ' +
+                'teardown that stops releasing its lite-signal nodes exhausts the shared pool.');
+        }
+        cyc.audio._retireHrtfWarm();                 // retire the prewarm before teardown
+        const busRec = cyc.audio._buses.get('spatial');
+        const sentinel = { cycle: c };
+        sp5Kept.push(sentinel);
+        const witness = sp5Tracker.track(sentinel, SP5_NOOP, c);
+        cyc.audio.destroy();
+        if (busRec.hrtfWarmHandle === null && busRec.posXYZ === null &&
+            busRec.posOwner === null && busRec.posDirty === null) {
+            sp5Tracker.untrack(witness);
+        }
+    }
+    if (sp5Kept.length !== SP5_CYCLES) die('T-SP5: internal -- pinned ' + sp5Kept.length + ' of ' + SP5_CYCLES);
+    const sp5Leaked = sp5Tracker.size();
+    process.stderr.write('T-SP5 (c) build/teardown soak: lite-leak witnessed ' + sp5Leaked +
+        ' un-released hrtf bus record(s) after ' + SP5_CYCLES + ' cycles (expected 0)\n');
+    if (sp5Leaked !== 0) {
+        die('T-SP5: lite-leak witnessed ' + sp5Leaked + ' hrtf bus record(s) still holding a ' +
+            'prewarm handle or positional scratch after destroy() -- a teardown leak.');
+    }
+
     process.stderr.write(
         'result: boxed-double handle (bus>=1, gen>8388608) is below the gate resolution; ' +
         'plain-number handle keeps its zero-retain property (decisions/0001). The v1.2.0 ' +
@@ -636,7 +829,9 @@ async function main() {
         'the SP-03 native-event rate to ~100/param/voice under a 200 cap (T-SP2), with ' +
         'steal-safety proven (a stolen channel gets zero stale writes). A lite-leak witness ' +
         'proves destroy() releases the per-bus positional scratch across ' + SP3_CYCLES +
-        ' build/teardown cycles (T-SP3).\n');
+        ' build/teardown cycles (T-SP3). S4: the hrtf bus builds HRTF panners across ' +
+        'capacity and the gain=0 HRIR prewarm retires on the monitor tick with no leaked ' +
+        'live node, released clean across ' + SP5_CYCLES + ' cycles (T-SP5).\n');
     process.stdout.write('ok\n');
     process.exit(0);
 }

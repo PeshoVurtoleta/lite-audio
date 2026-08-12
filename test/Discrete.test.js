@@ -416,29 +416,61 @@ describe('createBus discrete/preset validation: fail closed with a did-you-mean,
         audio.destroy();
     });
 
-    it('preset "5.1" and "3.1" throw a loud "lands in v2.5.0" RangeError, never a silent stereo fallback', async () => {
-        const { audio } = await buildDiscreteEngine(1);
-        for (const preset of ['5.1', '3.1']) {
-            assert.throws(
-                () => audio.createBus('b-' + preset, { spatial: 'discrete', preset }),
-                (err) => {
-                    assert.ok(err instanceof RangeError);
-                    assert.match(err.message, /v2\.5\.0/);
-                    return true;
-                },
-                'preset ' + preset,
-            );
-            assert.equal(audio._buses.has('b-' + preset), false);
-        }
+    it('preset "5.1" and "3.1" BUILD (S7: the v2.4.0 "lands in v2.5.0" RangeError is gone) on a sink that fits them', async () => {
+        // A fresh 8ch engine (not buildDiscreteEngine's 'surr', which already occupies
+        // this sink's discrete slot) so each preset gets its own clean bus/pool.
+        const ctx = createMockContext({ state: 'running', maxChannelCount: 8 });
+        const audio = new LiteAudio({
+            buses: [], poolCapacity: 4, window: fakeWindow(), document: mockDocument(),
+            fetch: mockFetch({ '/s5.wav': 500, '/s3.wav': 500 }), setTimeout: () => 0, clearTimeout: () => {},
+        });
+        await audio.init(ctx);
+
+        assert.doesNotThrow(() => audio.createBus('b-5.1', { spatial: 'discrete', preset: '5.1' }));
+        assert.doesNotThrow(() => audio.createBus('b-3.1', { spatial: 'discrete', preset: '3.1' }));
+        await audio.defineSounds({
+            p51: { src: ['/s5.wav'], bus: 'b-5.1' },
+            p31: { src: ['/s3.wav'], bus: 'b-3.1' },
+        });
+        await flushMicrotasks(8);
+
+        const bus51 = audio._buses.get('b-5.1');
+        const bus31 = audio._buses.get('b-3.1');
+        assert.equal(bus51.lanes, 6, '5.1 builds a 6-lane pool');
+        assert.equal(bus51.effectiveLayout, '5.1');
+        assert.equal(bus31.lanes, 4, '3.1 builds a 4-lane pool');
+        assert.equal(bus31.effectiveLayout, '3.1');
+
+        const h51 = audio.play('p51');
+        const h31 = audio.play('p31');
+        assert.ok(h51 >= 0, '5.1 bus must actually play');
+        assert.ok(h31 >= 0, '3.1 bus must actually play');
+
+        const lanes51 = bus51.pool.voiceNode(h51 >>> 0);
+        const lanes31 = bus31.pool.voiceNode(h31 >>> 0);
+        assert.ok(Array.isArray(lanes51));
+        assert.equal(lanes51.length, 6, '5.1 voiceNode() returns exactly 6 lane gains');
+        assert.ok(lanes51[LANE_LFE] && lanes51[LANE_LFE].gain, '5.1 LFE lane (index 3) is writable');
+        assert.ok(Array.isArray(lanes31));
+        assert.equal(lanes31.length, 4, '3.1 voiceNode() returns exactly 4 lane gains');
+        assert.ok(lanes31[LANE_LFE] && lanes31[LANE_LFE].gain, '3.1 LFE lane (index 3) is writable');
+
         audio.destroy();
     });
 
-    it('an unknown preset (e.g. "9.1") throws RangeError naming "7.1" as the only valid option', async () => {
+    it('an unknown preset (e.g. "9.1") throws RangeError naming all three valid presets ("7.1", "5.1", "3.1")', async () => {
         const { audio } = await buildDiscreteEngine(1);
         assert.throws(
             () => audio.createBus('bogus-preset', { spatial: 'discrete', preset: '9.1' }),
-            (err) => { assert.ok(err instanceof RangeError); assert.match(err.message, /7\.1/); return true; },
+            (err) => {
+                assert.ok(err instanceof RangeError);
+                assert.match(err.message, /7\.1/);
+                assert.match(err.message, /5\.1/);
+                assert.match(err.message, /3\.1/);
+                return true;
+            },
         );
+        assert.equal(audio._buses.has('bogus-preset'), false, 'fail closed: the bus was never created');
         audio.destroy();
     });
 
@@ -478,6 +510,60 @@ describe('createBus discrete/preset validation: fail closed with a did-you-mean,
         assert.equal(ctx.destination.channelCountMode, 'explicit');
         assert.equal(ctx.destination.channelInterpretation, 'discrete');
         audio.destroy();
+    });
+
+    // ---- D3: channelCount = max live discrete lanes, monotonic; destroy() ---
+    // ---- restores the pristine pre-discrete triple byte-for-byte -----------
+
+    it('D3: build 3.1 THEN 7.1 on an 8ch sink -> channelCount rises to the MAX (8), the pristine triple was saved on the FIRST (3.1) build, and destroy() restores it byte-for-byte', async () => {
+        const ctx = createMockContext({ state: 'running', maxChannelCount: 8 });
+        const pristine = {
+            channelCount: ctx.destination.channelCount,
+            channelCountMode: ctx.destination.channelCountMode,
+            channelInterpretation: ctx.destination.channelInterpretation,
+        };
+        const audio = new LiteAudio({
+            buses: [], poolCapacity: 4, window: fakeWindow(), document: mockDocument(),
+            fetch: mockFetch({ '/a.wav': 500, '/b.wav': 500 }), setTimeout: () => 0, clearTimeout: () => {},
+        });
+        await audio.init(ctx);
+
+        // First discrete build is the SMALLER preset (3.1, 4 lanes): this is where
+        // the pristine triple gets saved (Audio.js's _destChannelSaved===null latch).
+        audio.createBus('small', { spatial: 'discrete', preset: '3.1' });
+        await audio.defineSounds({ pingSmall: { src: ['/a.wav'], bus: 'small' } });
+        await flushMicrotasks(8);
+        assert.equal(ctx.destination.channelCount, 4, 'the first (3.1) discrete build sets channelCount to its own 4 lanes');
+        assert.equal(ctx.destination.channelCountMode, 'explicit');
+        assert.equal(ctx.destination.channelInterpretation, 'discrete');
+
+        // A SECOND, LARGER discrete bus (7.1, 8 lanes) RAISES channelCount to the new
+        // max WITHOUT re-saving the (already-pristine) triple.
+        audio.createBus('big', { spatial: 'discrete', preset: '7.1' });
+        await audio.defineSounds({
+            pingSmall: { src: ['/a.wav'], bus: 'small' },
+            pingBig: { src: ['/b.wav'], bus: 'big' },
+        });
+        await flushMicrotasks(8);
+        assert.equal(ctx.destination.channelCount, 8, 'a later, LARGER discrete bus must raise channelCount to the new max');
+        assert.equal(ctx.destination.channelCountMode, 'explicit');
+        assert.equal(ctx.destination.channelInterpretation, 'discrete');
+
+        // Both buses still actually play at their built layout.
+        const hSmall = audio.play('pingSmall');
+        const hBig = audio.play('pingBig');
+        assert.ok(hSmall >= 0);
+        assert.ok(hBig >= 0);
+        assert.equal(audio.effectiveLayoutOf('small'), '3.1');
+        assert.equal(audio.effectiveLayoutOf('big'), '7.1');
+
+        audio.destroy();
+
+        // destroy() restores the SAVED (pristine, pre-3.1) triple verbatim -- not
+        // some intermediate 4ch reading, byte-for-byte identical to the original.
+        assert.equal(ctx.destination.channelCount, pristine.channelCount);
+        assert.equal(ctx.destination.channelCountMode, pristine.channelCountMode);
+        assert.equal(ctx.destination.channelInterpretation, pristine.channelInterpretation);
     });
 });
 

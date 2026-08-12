@@ -1,5 +1,75 @@
 # Changelog
 
+## 2.5.0
+
+The 5+1 (6-channel) and 3+1 (4-channel) reductions of the S6 discrete-surround
+bus, plus a cold fallback LADDER so any discrete request builds the largest
+layout the sink actually fits and reports it. Session S7 of the spatial roadmap.
+This GENERALIZES the S6 8-lane machinery; it does not rewrite it.
+
+`layoutOf()` widens from the binary `'7.1' | 'stereo'` to the richest single
+layout the sink supports: `>= 8 -> '7.1'`, `6` or `7 -> '5.1'`, `4` or
+`5 -> '3.1'`, else `'stereo'`, still resolved once at `init()` and cached.
+`createBus(name, { spatial: 'discrete', preset: '5.1' | '3.1' })` stops rejecting
+and builds its pool in the pool's matching `channels: 6 | 4` mode. The per-bus
+effective layout is `min(requested, sink-supported)` stepped down the ladder
+`7.1 -> 5.1 -> 3.1 -> stereo`; a request never UPGRADES.
+
+Additive and default-off: no non-discrete bus record, `play()`, `stop()`, or
+`setPosition()` byte moves, and the hot path gains ZERO new branches. The S6 VBAP
+solver is generalized to a cold, data-driven walk of a per-preset frozen ring
+record captured at bus construction, so `_flushLanes()` gains no per-tick preset
+test. The `HashParity` `stop()` and `play()` goldens do not move.
+
+`destination.channelCount` is set to the MAX lane count across live discrete
+buses; the pristine pre-discrete triple is saved once, on the first discrete
+build, and restored verbatim on `destroy()`.
+
+### BEHAVIOR CHANGE
+
+- `layoutOf()` on a real 4- or 6-channel sink now returns `'3.1'` / `'5.1'`
+  where S6 (which recognized only `>= 8`) returned `'stereo'`. The two S6 tokens
+  keep their meaning: a caller testing `=== '7.1'` still gets it only on a
+  `>= 8` sink; the change is visible only to a `=== 'stereo'` caller on a real
+  4/6-channel sink. On a 2-channel sink (including a virtual-surround headset
+  reporting `maxChannelCount 2`) the reading is unchanged -- still `'stereo'`.
+
+### Added
+
+- `createBus(name, { spatial: 'discrete', preset: '5.1' })` and `preset: '3.1'`
+  -- the 6-lane (`L R C LFE SL SR`) and 4-lane (`L R C LFE`, front-only)
+  reductions of the 7+1 bus. Each builds the largest preset the sink fits via the
+  fallback ladder; `effectiveLayoutOf()` reports the built token. `'7.1'` remains
+  the default preset. A request never upgrades: a `'5.1'` request on an 8-channel
+  sink stays `'5.1'`.
+- The discrete fallback ladder: a preset request on a sink of `M` channels builds
+  the largest preset whose channel-need `<= min(request-need, M)`, stepping down
+  `7.1 -> 5.1 -> 3.1 -> stereo`. When even `3.1` does not fit (`M < 4`) the bus
+  fails closed to a WORKING plain-stereo bus (`lanes = 0`) that plays normally.
+
+### Changed
+
+- `layoutOf()` return union widened to `'7.1' | '5.1' | '3.1' | 'stereo'`.
+- `effectiveLayoutOf(busName)` return union widened to
+  `'7.1' | '5.1' | '3.1' | 'stereo' | null` -- it now reports the built ladder
+  token (`'7.1'` request on a 6-channel sink returns `'5.1'`).
+- `createBus` `preset` union widened to `'7.1' | '5.1' | '3.1'`. `'5.1'` / `'3.1'`
+  no longer throw the S6 "lands in v2.5.0" `RangeError`; they build.
+
+### Notes
+
+- `3.1` is front-only (no rear speakers): a source directly behind the listener
+  folds across the 300-degree back gap between `R` (30 degrees) and `L` (330
+  degrees). Correct for a front-only rig, a documented limitation, not a bug.
+- Peer range unchanged at `@zakkster/lite-audio-pool ^1.4.0` (the pool has shipped
+  `channels: { 4, 6, 8 }` since 1.3.0). No pool release is needed.
+- Headless CI has no multichannel sink and the reference client rig reports
+  `maxChannelCount 2`, so `5.1` / `3.1` -- like `7.1` -- fall back to stereo on
+  that hardware. CI proves detection, the ladder, fallback-to-working-stereo,
+  zero-allocation lane writes, rate bounds and retention against a mock N-channel
+  context; the audible 6/4-lane traversal is a manual QA step on real hardware.
+- See `decisions/0009-preset-ladder.md` for D1-D5.
+
 ## 2.4.0
 
 Fail-closed output-layout detection and a 7+1 discrete-surround bus family,

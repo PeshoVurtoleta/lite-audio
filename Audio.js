@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.4.0';
+export const VERSION = '2.5.0';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -48,15 +48,20 @@ const POS_TC = 0.02;
  */
 const LAYOUT_STEREO = 'stereo';
 const LAYOUT_71 = '7.1';
+const LAYOUT_51 = '5.1';
+const LAYOUT_31 = '3.1';
 
 /**
- * 7+1 discrete-surround preset (S6). A discrete bus rides the pool's discrete mode
- * with exactly 8 lanes. PRESET_CHANNELS_71 is BOTH the lane count handed to the pool
- * (`channels: 8`) AND the detection threshold: a sink must report at least this many
- * hardware channels to earn a 7.1 layout. Kept as one constant so the two uses cannot
- * drift.
+ * Discrete-surround preset channel counts (S6/S7). Each is BOTH the lane count handed
+ * to the pool (`channels: N`) AND that preset's detection/ladder threshold: a sink must
+ * report at least this many hardware channels to carry the preset. Kept as one constant
+ * per preset so the two uses cannot drift. The pool ships channels in {4,6,8}
+ * (AudioPool.js), and the SMPTE lane order is shared across all three (see LANE_*):
+ * 7.1 -> 8, 5.1 -> 6, 3.1 -> 4.
  */
 const PRESET_CHANNELS_71 = 8;
+const PRESET_CHANNELS_51 = 6;
+const PRESET_CHANNELS_31 = 4;
 
 /**
  * Frozen SMPTE lane indices for the 7+1 bus (S6). These match the pool's discrete
@@ -93,13 +98,46 @@ const VBAP_RING_71 = new Uint8Array([LANE_C, LANE_R, LANE_SR, LANE_SBR, LANE_SBL
 const VBAP_RING_AZ_71 = new Float32Array([0, 30, 110, 150, 210, 250, 330, 360]);
 
 /**
+ * Reduced VBAP rings for the 5+1 and 3+1 presets (S7). The lane INDICES are shared with
+ * 7+1 (the pool uses the same low SMPTE indices for shared lanes), so a smaller preset
+ * simply drops the higher lanes and re-spaces the ring:
+ *   5.1 drops SBR/SBL -> ring [C, R, SR, SL, L], az [0, 30, 110, 250, 330, 360]
+ *   3.1 drops all surrounds (front-only) -> ring [C, R, L], az [0, 30, 330, 360]
+ * Each az array keeps the trailing 360 WRAP SENTINEL so the containing-pair scan stays a
+ * plain ascending walk with no modulo (identical to 7+1). 3.1 has no rear speaker: a
+ * source directly behind the listener folds across the 300-degree back gap between R (30)
+ * and L (330). That is correct for a front-only rig, a documented limitation (see
+ * decisions/0009), not a bug. y (height) is never panned in any preset.
+ */
+const VBAP_RING_51 = new Uint8Array([LANE_C, LANE_R, LANE_SR, LANE_SL, LANE_L]);
+const VBAP_RING_AZ_51 = new Float32Array([0, 30, 110, 250, 330, 360]);
+const VBAP_RING_31 = new Uint8Array([LANE_C, LANE_R, LANE_L]);
+const VBAP_RING_AZ_31 = new Float32Array([0, 30, 330, 360]);
+
+/**
  * LFE lane send (S6). LANE_LFE is fed an azimuth-invariant constant send so the low
  * lane is never dead; the band-limiting itself is the pool's shared lowpass (lite-audio
  * never sets the crossover). This is a bass-management send level (~ -6 dB), not a
- * pan gain -- the solver writes it to LANE_LFE every flush as the 8th of 8 lane writes,
- * and it carries 0 VBAP-derived content by construction.
+ * pan gain -- the solver writes it to LANE_LFE every flush as the last lane write, and
+ * it carries 0 VBAP-derived content by construction.
  */
 const LFE_SEND = 0.5;
+
+/**
+ * Frozen per-preset ring records (S7). Each captures everything the generalized cold
+ * solver (_vbapSolve) and the data-driven flush (_flushLanes) need to walk one preset:
+ *   layout  the caller-visible effectiveLayout token
+ *   lanes   the pool channel count == the exact number of lane gains written per flush
+ *   ring    the VBAP speaker ring (lane index at each ring position, non-LFE)
+ *   az      that ring's azimuths (degrees, trailing 360 wrap sentinel)
+ *   lfe     the LFE lane index (always 3, outside the VBAP set, distance-only send)
+ * A discrete bus captures exactly ONE of these on busRec.vbap at construction (cold), so
+ * the hot/monitor path never branches on preset -- the ring array length is the selector,
+ * resolved once. Frozen so a stray write can never mutate a shared record.
+ */
+const PRESET_71 = Object.freeze({ layout: LAYOUT_71, lanes: PRESET_CHANNELS_71, ring: VBAP_RING_71, az: VBAP_RING_AZ_71, lfe: LANE_LFE });
+const PRESET_51 = Object.freeze({ layout: LAYOUT_51, lanes: PRESET_CHANNELS_51, ring: VBAP_RING_51, az: VBAP_RING_AZ_51, lfe: LANE_LFE });
+const PRESET_31 = Object.freeze({ layout: LAYOUT_31, lanes: PRESET_CHANNELS_31, ring: VBAP_RING_31, az: VBAP_RING_AZ_31, lfe: LANE_LFE });
 
 /**
  * The one reused lane-gain scratch (S6). _flushLanes solves a voice's 8 lane gains into
@@ -554,8 +592,39 @@ export class LiteAudio {
      */
     _detectLayout() {
         const v = this._ctx?.destination?.maxChannelCount;
-        this._maxChannels = (typeof v === 'number' && Number.isFinite(v)) ? v : null;
-        this._layout = (Number.isInteger(v) && v >= PRESET_CHANNELS_71) ? LAYOUT_71 : LAYOUT_STEREO;
+        // Sanitize to an integer channel count (0 for any non-integer / NaN / null /
+        // absent reading) so the ladder later reasons over a plain number. "null is not
+        // zero" -- but a non-integer reading is UNKNOWN, and an unknown sink is stereo.
+        const n = Number.isInteger(v) ? v : 0;
+        this._maxChannels = n;
+        // Richest single layout the sink can carry (D1): >=8 -> 7.1, >=6 -> 5.1,
+        // >=4 -> 3.1, else stereo. A widening of the S6 binary threshold; every
+        // non-qualifying shape still fails closed to stereo, never an optimistic upgrade.
+        this._layout = n >= PRESET_CHANNELS_71 ? LAYOUT_71
+            : n >= PRESET_CHANNELS_51 ? LAYOUT_51
+            : n >= PRESET_CHANNELS_31 ? LAYOUT_31
+            : LAYOUT_STEREO;
+    }
+
+    /**
+     * Cold fallback-ladder resolver (S7). Maps a requested preset token and the sink's
+     * sanitized channel count to the LARGEST preset record that fits, or null (build a
+     * plain stereo bus). A request never UPGRADES: fit = min(request-need, maxChannels),
+     * then step DOWN the ladder 7.1 -> 5.1 -> 3.1 -> stereo. Called ONCE per discrete bus
+     * at construction; neither play() nor _flushLanes re-tests it. Pure, allocation-free.
+     * @param {string} requested - '7.1' | '5.1' | '3.1'
+     * @param {number} maxChannels - sanitized integer sink channel count (0 if unknown)
+     * @returns {Object|null} PRESET_71 | PRESET_51 | PRESET_31, or null for stereo
+     */
+    _resolvePreset(requested, maxChannels) {
+        const need = requested === LAYOUT_71 ? PRESET_CHANNELS_71
+            : requested === LAYOUT_51 ? PRESET_CHANNELS_51
+            : PRESET_CHANNELS_31;                 // '3.1'
+        const fit = maxChannels < need ? maxChannels : need;   // min(request-need, M)
+        if (fit >= PRESET_CHANNELS_71) return PRESET_71;
+        if (fit >= PRESET_CHANNELS_51) return PRESET_51;
+        if (fit >= PRESET_CHANNELS_31) return PRESET_31;
+        return null;
     }
 
     /**
@@ -606,26 +675,20 @@ export class LiteAudio {
             );
         }
 
-        // Discrete-surround preset (S6). Meaningful ONLY on a spatial:'discrete' bus;
-        // a preset on any other bus is a wiring error, not a silent ignore. S6 ships
-        // one preset, '7.1' (8 lanes). '5.1'/'3.1' are named but REJECT LOUDLY rather
-        // than silently degrade -- an S7-anticipating caller must never be sold a
-        // stereo bus in silence. Any other value fails closed with a did-you-mean.
-        // Note: 'discrete' and 'hrtf' are a single `spatial` field, so they cannot
-        // compose on one bus by construction (decisions/0008 risk 3).
+        // Discrete-surround preset (S6/S7). Meaningful ONLY on a spatial:'discrete' bus;
+        // a preset on any other bus is a wiring error, not a silent ignore. S7 ships
+        // three presets -- '7.1' (8 lanes), '5.1' (6 lanes), '3.1' (4 lanes) -- each of
+        // which builds the largest layout the sink actually fits (the fallback ladder,
+        // resolved cold below). Any OTHER value fails closed with a did-you-mean. Note:
+        // 'discrete' and 'hrtf' are a single `spatial` field, so they cannot compose on
+        // one bus by construction (decisions/0008 risk 3).
         let preset = null;
         if (spatial === 'discrete') {
-            preset = opts.preset ?? '7.1';
-            if (preset === '5.1' || preset === '3.1') {
-                throw new RangeError(
-                    'LiteAudio: createBus("' + name + '") discrete preset "' + preset +
-                    '" lands in v2.5.0 -- S6 ships only the "7.1" preset.'
-                );
-            }
-            if (preset !== '7.1') {
+            preset = opts.preset ?? LAYOUT_71;
+            if (preset !== LAYOUT_71 && preset !== LAYOUT_51 && preset !== LAYOUT_31) {
                 throw new RangeError(
                     'LiteAudio: createBus("' + name + '") got unknown discrete preset "' +
-                    preset + '" -- expected "7.1".'
+                    preset + '" -- expected "7.1", "5.1" or "3.1".'
                 );
             }
         } else if (opts.preset !== undefined) {
@@ -635,14 +698,18 @@ export class LiteAudio {
             );
         }
 
-        // A discrete request becomes an 8-lane bus ONLY when the DETECTED layout can
-        // carry it; otherwise it fails closed to a working plain-stereo bus (lanes=0)
-        // and REPORTS a stereo effectiveLayout, so a caller can see the fallback via
-        // effectiveLayoutOf(). On a 2ch sink this is the expected outcome and a PASS,
-        // not a failure. effectiveLayout stays null on a non-discrete bus.
-        const lanes = (spatial === 'discrete' && this._layout === LAYOUT_71) ? PRESET_CHANNELS_71 : 0;
+        // A discrete request resolves down the fallback ladder (S7): _resolvePreset picks
+        // the LARGEST preset record whose channel-need fits min(request, sink), or null
+        // when even 3.1 does not fit -- in which case the bus fails closed to a working
+        // plain-stereo bus (lanes=0, vbap=null) and REPORTS a stereo effectiveLayout so a
+        // caller can see the fallback via effectiveLayoutOf(). On a 2ch sink this is the
+        // expected outcome and a PASS, not a failure. `vbap` (the per-preset ring record)
+        // and effectiveLayout stay null on a non-discrete bus. The ladder is computed ONCE
+        // here, cold; play() and _flushLanes never re-test it.
+        const vbap = spatial === 'discrete' ? this._resolvePreset(preset, this._maxChannels) : null;
+        const lanes = vbap ? vbap.lanes : 0;
         const effectiveLayout = spatial === 'discrete'
-            ? (lanes !== 0 ? LAYOUT_71 : LAYOUT_STEREO)
+            ? (vbap ? vbap.layout : LAYOUT_STEREO)
             : null;
 
         // Stereo widener (S5). Validated and armed COLD here; the hot play()/stop()
@@ -756,15 +823,19 @@ export class LiteAudio {
             posXYZ: null,
             posOwner: null,
             posDirty: null,
-            // Discrete surround (S6). `lanes` is 8 for a discrete bus under a detected
-            // 7.1 sink, else 0 (a stereo-fallback discrete bus, or any other bus).
-            // A NONZERO lanes is what makes this bus reuse the posXYZ/posOwner/posDirty
-            // scratch (allocated at pool build) and ride the _flushLanes monitor step
-            // instead of _flushPositions -- setPosition gains no new branch, it just
-            // sees a non-null posDirty. `effectiveLayout` is the caller-visible readout:
-            // '7.1' when the 8 lanes were built, 'stereo' when a discrete request fell
-            // back, null on a non-discrete bus.
+            // Discrete surround (S6/S7). `lanes` is the built preset's channel count
+            // (8/6/4 for 7.1/5.1/3.1), else 0 (a stereo-fallback discrete bus, or any
+            // other bus). A NONZERO lanes is what makes this bus reuse the
+            // posXYZ/posOwner/posDirty scratch (allocated at pool build) and ride the
+            // _flushLanes monitor step instead of _flushPositions -- setPosition gains no
+            // new branch, it just sees a non-null posDirty. `vbap` is the frozen
+            // per-preset ring record the cold solver walks (null on a fallen-back stereo
+            // bus or a non-discrete bus), so _flushLanes never branches on preset.
+            // `effectiveLayout` is the caller-visible readout: the built preset token
+            // ('7.1'/'5.1'/'3.1') when lanes were built, 'stereo' when a discrete request
+            // fell back, null on a non-discrete bus.
             lanes,
+            vbap,
             effectiveLayout,
             // HRIR prewarm (SP-07). An 'hrtf' bus fires one gain=0 voice through the
             // pool POST-unlock so the browser loads the HRTF impulse-response set
@@ -966,22 +1037,30 @@ export class LiteAudio {
                 }
                 if (nonMono) this._disarmWidth(busRec, 'stereo-source');
             }
-            // Destination channel mutation (S6). Setting channelCount=8 on the
-            // destination is process-global for the context, so it happens ONLY at the
-            // FIRST discrete pool build (not in init(), not in _detectLayout, and never
-            // on a fallback stereo bus), and the prior triple is saved for destroy() to
-            // restore. An engine that never builds a discrete pool never touches the
-            // destination downmix. _destChannelSaved===null is the "never mutated" latch.
-            if (busRec.lanes !== 0 && this._destChannelSaved === null) {
+            // Destination channel mutation (S6/S7). Setting channelCount on the
+            // destination is process-global for the context, so it is driven by the MAX
+            // lane count across all live discrete buses (D3). The pristine triple is saved
+            // EXACTLY ONCE, at the FIRST discrete pool build (not in init(), not in
+            // _detectLayout, and never on a fallback stereo bus); a LATER discrete bus with
+            // MORE lanes RAISES channelCount to the new max WITHOUT re-saving (the saved
+            // copy stays the pristine pre-discrete value destroy() restores). Discrete
+            // buses are add-only within a session, so the max is monotonic. An engine that
+            // never builds a discrete pool never touches the downmix. _destChannelSaved===
+            // null is the "never mutated" latch.
+            if (busRec.lanes !== 0) {
                 const dest = this._ctx.destination;
-                this._destChannelSaved = {
-                    channelCount: dest.channelCount,
-                    channelCountMode: dest.channelCountMode,
-                    channelInterpretation: dest.channelInterpretation,
-                };
-                dest.channelCount = PRESET_CHANNELS_71;
-                dest.channelCountMode = 'explicit';
-                dest.channelInterpretation = 'discrete';
+                if (this._destChannelSaved === null) {
+                    this._destChannelSaved = {
+                        channelCount: dest.channelCount,
+                        channelCountMode: dest.channelCountMode,
+                        channelInterpretation: dest.channelInterpretation,
+                    };
+                    dest.channelCount = busRec.lanes;
+                    dest.channelCountMode = 'explicit';
+                    dest.channelInterpretation = 'discrete';
+                } else if (busRec.lanes > dest.channelCount) {
+                    dest.channelCount = busRec.lanes;
+                }
             }
             // Spatial mode is captured HERE, at pool construction (cold), so the
             // hot play() never re-tests it: a stereo bus builds StereoPanner voices
@@ -1749,22 +1828,26 @@ export class LiteAudio {
     // ---------- Output layout (S6) -----------------------------------------
 
     /**
-     * The engine's DETECTED output layout, resolved once at init() and cached:
-     * LAYOUT_71 ('7.1') when the sink reported a concrete integer >= 8 hardware
-     * channels, else LAYOUT_STEREO ('stereo') -- the fail-closed default for every
-     * unverified sink. Cold readout; safe any time after init().
-     * @returns {'7.1'|'stereo'}
+     * The engine's DETECTED output layout: the RICHEST single layout the sink can carry,
+     * resolved once at init() and cached (S6/S7). LAYOUT_71 ('7.1') on a concrete integer
+     * >= 8 channels, LAYOUT_51 ('5.1') on 6 or 7, LAYOUT_31 ('3.1') on 4 or 5, else
+     * LAYOUT_STEREO ('stereo') -- the fail-closed default for every unverified sink
+     * (< 4, non-integer, NaN, null, absent). A mid-session device change does not
+     * re-detect. Cold readout; safe any time after init().
+     * @returns {'7.1'|'5.1'|'3.1'|'stereo'}
      */
     layoutOf() { return this._layout; }
 
     /**
-     * A discrete bus's EFFECTIVE layout: '7.1' when its 8 lanes were actually built,
-     * 'stereo' when a discrete request fell back (a sink under 8 channels), or null on
-     * a non-discrete bus or an unknown name. This is how a caller learns whether the
-     * fallback happened -- a discrete request on a 2ch sink returns 'stereo' here and
-     * that is correct, not an error.
+     * A discrete bus's EFFECTIVE layout: the BUILT preset token ('7.1'/'5.1'/'3.1') after
+     * the request was stepped down the fallback ladder to fit the sink, 'stereo' when a
+     * discrete request fell all the way back (even 3.1 did not fit), or null on a
+     * non-discrete bus or an unknown name. This is how a caller learns whether -- and how
+     * far -- the fallback stepped: a '7.1' request on a 6ch sink returns '5.1' here, and a
+     * discrete request on a 2ch sink returns 'stereo', both correct, not errors. Distinct
+     * from layoutOf(), which reports the sink CAPABILITY, not the per-bus built layout.
      * @param {string} busName
-     * @returns {'7.1'|'stereo'|null}
+     * @returns {'7.1'|'5.1'|'3.1'|'stereo'|null}
      */
     effectiveLayoutOf(busName) {
         return this._buses.get(busName)?.effectiveLayout ?? null;
@@ -2214,44 +2297,48 @@ export class LiteAudio {
     }
 
     /**
-     * Pure 7+1 pan solver (S6): (x, y, z) -> the 8 lane gains in LANE_SCRATCH, which
-     * it returns. Zero allocation (writes the one reused module scratch), no
-     * Math.hypot, no array literal, no closure. Constant-power pairwise (VBAP) panning
-     * over the SEVEN non-LFE lanes on a horizontal ring: azimuth az = atan2(x, -z)
-     * normalized to [0, 360) picks the containing adjacent speaker pair (the ring's
-     * trailing 360 sentinel makes the last wrap interval branchless), and the tangent
-     * law g1 = cos(f*PI/2), g2 = sin(f*PI/2) splits the source across that pair with
-     * g1^2 + g2^2 === 1 (flat power as it moves). Every other ring lane is 0. LANE_LFE
-     * is OUTSIDE the VBAP set: it gets the azimuth-invariant LFE_SEND, the 8th write,
-     * never a pan value. y (height) has no lane -- it is not panned (decisions/0008).
+     * Pure, data-driven VBAP pan solver (S6/S7): (rec, x, y, z) -> the preset's lane gains
+     * in LANE_SCRATCH, which it returns. `rec` is the frozen per-preset ring record
+     * (PRESET_71/51/31) captured cold on the bus; the SAME code walks every preset with NO
+     * per-tick preset branch -- the ring array length IS the selector. Zero allocation
+     * (writes the one reused module scratch, width 8, shared across all presets), no
+     * Math.hypot, no array literal, no closure. Constant-power pairwise (VBAP) panning over
+     * the preset's NON-LFE ring lanes: azimuth az = atan2(x, -z) normalized to [0, 360)
+     * picks the containing adjacent speaker pair (the ring's trailing 360 sentinel makes
+     * the last wrap interval branchless), and the tangent law g1 = cos(f*PI/2),
+     * g2 = sin(f*PI/2) splits the source across that pair with g1^2 + g2^2 === 1 (flat
+     * power as it moves). Every OTHER ring lane in the preset is zeroed; rec.lfe (index 3)
+     * is OUTSIDE the VBAP set and gets the azimuth-invariant LFE_SEND, the last write, never
+     * a pan value. The solver writes ONLY the preset's own lanes, so the shared width-8
+     * scratch never leaks a stale upper-lane value to a smaller preset's flush. y (height)
+     * has no lane -- it is not panned (decisions/0008, 0009).
+     * @param {Object} rec - PRESET_71 | PRESET_51 | PRESET_31 (frozen ring record)
      * @param {number} x
      * @param {number} y - unused for panning (folded to distance only), kept for the
      *   frozen setPosition(x,y,z) shape so the solver reads the same scratch layout.
      * @param {number} z
-     * @returns {Float32Array} LANE_SCRATCH, the 8 resolved lane gains
+     * @returns {Float32Array} LANE_SCRATCH, the preset's resolved lane gains (lanes 0..N-1)
      */
-    _vbap71(x, y, z) {
+    _vbapSolve(rec, x, y, z) {
         const s = LANE_SCRATCH;
-        // Zero the seven ring lanes explicitly (no fill closure); LFE is set below.
-        s[LANE_L] = 0; s[LANE_R] = 0; s[LANE_C] = 0;
-        s[LANE_SL] = 0; s[LANE_SR] = 0; s[LANE_SBL] = 0; s[LANE_SBR] = 0;
+        const ring = rec.ring;
+        const azRing = rec.az;
+        const n = ring.length;
+        // Zero every ring lane THIS preset uses (data-driven, no fill closure); LFE below.
+        for (let j = 0; j < n; j++) s[ring[j]] = 0;
         // atan2(x, -z): +x is right, -z is forward, so 0 degrees is dead front (center).
         let az = Math.atan2(x, -z) * RAD_TO_DEG;
         if (az < 0) az += 360;                       // normalize to [0, 360), no modulo
-        const azRing = VBAP_RING_AZ_71;
-        const ring = VBAP_RING_71;
         // Ascending containing-pair scan. az is always < 360 (atan2 maxes at 180), and
-        // azRing[7] === 360, so i stops at <= 6 and never reads out of bounds.
+        // azRing[n] === 360 (the wrap sentinel), so i stops at <= n-1 and never overruns.
         let i = 0;
         while (az >= azRing[i + 1]) i++;
         const span = azRing[i + 1] - azRing[i];
         const f = (az - azRing[i]) / span;
-        const g1 = Math.cos(f * HALF_PI);
-        const g2 = Math.sin(f * HALF_PI);
-        s[ring[i]] = g1;
-        s[i === 6 ? ring[0] : ring[i + 1]] = g2;     // ring[6]=L wraps to ring[0]=C
-        // LFE: azimuth-invariant distance-only send, always the 8th lane written.
-        s[LANE_LFE] = LFE_SEND;
+        s[ring[i]] = Math.cos(f * HALF_PI);
+        s[i === n - 1 ? ring[0] : ring[i + 1]] = Math.sin(f * HALF_PI);  // last ring wraps to ring[0]
+        // LFE: azimuth-invariant distance-only send, always the last lane written.
+        s[rec.lfe] = LFE_SEND;
         return s;
     }
 
@@ -2260,13 +2347,17 @@ export class LiteAudio {
      * discrete analogue of _flushPositions: setPosition() stamped the same
      * posXYZ/posOwner/posDirty scratch (no new branch), and here -- on the tick, right
      * after _flushPositions skipped these buses -- each dirty voice is solved once by
-     * _vbap71 and its 8 lane gains are written with setTargetAtTime(v, now, POS_TC),
-     * inheriting the identical ~10 Hz cadence and 20 ms glide the position flush uses
-     * (so the SP-03 native-event rate bound is inherited, not re-derived). Steal-safe:
-     * posOwner holds the full gen+channel handle, so a stolen channel resolves to a
-     * null voiceNode and its stale bit is dropped with zero lane writes onto the new
-     * occupant. Allocation-free: indexed word scan, the one reused LANE_SCRATCH, locals
-     * only. Iterates this._discreteBuses, which is empty on every non-discrete engine.
+     * _vbapSolve over the bus's frozen preset record (busRec.vbap) and EXACTLY
+     * busRec.lanes lane gains are written with setTargetAtTime(v, now, POS_TC), inheriting
+     * the identical ~10 Hz cadence and 20 ms glide the position flush uses (so the SP-03
+     * native-event rate bound is inherited, not re-derived). Data-driven over the ring
+     * record: the write loop runs busRec.lanes times (8/6/4 for 7.1/5.1/3.1), NO per-tick
+     * preset branch, and it reads only lanes 0..N-1 so a smaller preset never touches a
+     * stale upper scratch lane. Steal-safe: posOwner holds the full gen+channel handle, so
+     * a stolen channel resolves to a null voiceNode and its stale bit is dropped with zero
+     * lane writes onto the new occupant. Allocation-free: indexed word scan, the one reused
+     * LANE_SCRATCH, locals only. Iterates this._discreteBuses, empty on every non-discrete
+     * engine.
      */
     _flushLanes() {
         const list = this._discreteBuses;
@@ -2279,6 +2370,8 @@ export class LiteAudio {
             if (dirty === null) continue;
             const xyz = busRec.posXYZ;
             const owner = busRec.posOwner;
+            const rec = busRec.vbap;                    // frozen preset ring record
+            const nLanes = busRec.lanes;                // exactly this many gains per voice
             for (let w = 0; w < dirty.length; w++) {
                 let bits = dirty[w];
                 if (bits === 0) continue;
@@ -2287,18 +2380,13 @@ export class LiteAudio {
                     const low = bits & -bits;                  // lowest set bit
                     const ch = base + (31 - Math.clz32(low));  // its channel index
                     bits ^= low;
-                    const lanes = pool.voiceNode(owner[ch]); // discrete: Array(8) of gains
+                    const lanes = pool.voiceNode(owner[ch]); // discrete: Array(N) of gains
                     if (lanes === null) continue;              // stolen/dead: skip
                     const i3 = ch * 3;
-                    const g = this._vbap71(xyz[i3], xyz[i3 + 1], xyz[i3 + 2]);
-                    lanes[LANE_L].gain.setTargetAtTime(g[LANE_L], now, POS_TC);
-                    lanes[LANE_R].gain.setTargetAtTime(g[LANE_R], now, POS_TC);
-                    lanes[LANE_C].gain.setTargetAtTime(g[LANE_C], now, POS_TC);
-                    lanes[LANE_LFE].gain.setTargetAtTime(g[LANE_LFE], now, POS_TC);
-                    lanes[LANE_SL].gain.setTargetAtTime(g[LANE_SL], now, POS_TC);
-                    lanes[LANE_SR].gain.setTargetAtTime(g[LANE_SR], now, POS_TC);
-                    lanes[LANE_SBL].gain.setTargetAtTime(g[LANE_SBL], now, POS_TC);
-                    lanes[LANE_SBR].gain.setTargetAtTime(g[LANE_SBR], now, POS_TC);
+                    const g = this._vbapSolve(rec, xyz[i3], xyz[i3 + 1], xyz[i3 + 2]);
+                    for (let k = 0; k < nLanes; k++) {
+                        lanes[k].gain.setTargetAtTime(g[k], now, POS_TC);
+                    }
                 }
                 dirty[w] = 0;                        // every bit in this word handled
             }
@@ -2574,12 +2662,14 @@ export class LiteAudio {
             busRec.width = 0;
             busRec.widthLast = NaN;
             busRec.widthRefused = null;
-            // Reset discrete-surround state (S6). lanes back to 0 so a torn-down bus
-            // never re-enters _flushLanes; effectiveLayout to null (not a token) so a
-            // stray effectiveLayoutOf after destroy reads "no discrete bus", not a
+            // Reset discrete-surround state (S6/S7). lanes back to 0 so a torn-down bus
+            // never re-enters _flushLanes; vbap to null (not a stale record) so no cold
+            // solve can run against a torn-down bus; effectiveLayout to null (not a token)
+            // so a stray effectiveLayoutOf after destroy reads "no discrete bus", not a
             // stale layout. The pool above (discrete merger/lowpass/lanes) was already
             // disconnected by pool.destroy().
             busRec.lanes = 0;
+            busRec.vbap = null;
             busRec.effectiveLayout = null;
         }
         // Empty the discrete-bus list and restore the destination channel triple we

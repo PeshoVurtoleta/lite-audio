@@ -19,14 +19,14 @@ that eventually deprecates the Howler wrapper it replaces.
 - Zero deps of its own; two peers: `@zakkster/lite-signal` and
   `@zakkster/lite-audio-pool`
 - ~7.5 KB minified, ~2.7 KB gzipped
-- No Howler, no HTML5 Audio fallback, no MP3 decoder shim — just the Web Audio
+- No Howler, no HTML5 Audio fallback, no MP3 decoder shim -- just the Web Audio
   API surface the modern web has had since 2018, wired precisely
 - Ports the iOS/mobile unlock semantics of `lite-audio-manager` verbatim, plus a
   bounded pre-unlock play queue the manager could not offer from Howler's outside
 
 **Status:** v1.0.0 covers SFX; v1.1.0 added the music streaming layer
 (`MediaElementAudioSourceNode`, crossfades, exclusive/unique); v1.2.0 added mix
-intelligence — ducking, snapshots, auto-suspend, per-bus meters, dynamic buses;
+intelligence -- ducking, snapshots, auto-suspend, per-bus meters, dynamic buses;
 **v2.0.0 ships the `./compat` drop-in** for `lite-audio-manager` with full parity
 certification. Migrate off the Howler overlay by changing one import.
 
@@ -82,10 +82,10 @@ audio.destroy();                          // idempotent, disconnects the graph
 ## Handles
 
 `play()` returns a **bus-tagged** handle: `busIndex * 2^32 + poolHandle`. Treat it
-as opaque — get it from `play()`, pass it to `stop()` / `isPlaying()`.
+as opaque -- get it from `play()`, pass it to `stop()` / `isPlaying()`.
 
-The tag is not decoration. A pool handle is a full `uint32` — `[gen:24][channel:8]`,
-no spare bits — and every bus runs its own `AudioPool` counting channels and
+The tag is not decoration. A pool handle is a full `uint32` -- `[gen:24][channel:8]`,
+no spare bits -- and every bus runs its own `AudioPool` counting channels and
 generations from zero. So the first play on *every* bus hands back the identical
 raw handle, `0x00000000`. Without the tag, `stop()` on an `sfx` handle also killed
 whatever sat on channel 0 of `ui`, `voice`, and `music`. The generation counter
@@ -95,23 +95,23 @@ cannot prevent that: it is a recycle counter, not a namespace. With the tag,
 Handles stay plain numbers, exact well inside `2^53`, so `-1` still means "no voice"
 (unknown sound, not loaded, or context locked). `playUnique()` on a *track* returns
 `-2`: tracks are name-addressed singletons with no handle, and `0` was never
-available as a "nothing" value — it is a real voice.
+available as a "nothing" value -- it is a real voice.
 
 ### The four encodings
 
 One `number`, four kinds of value. Typed as `VoiceHandle | Skipped | TrackStarted`
-in the `.d.ts` — `VoiceHandle` is a *branded* number, so a raw integer or a track
+in the `.d.ts` -- `VoiceHandle` is a *branded* number, so a raw integer or a track
 name cannot be handed to `stop()` by mistake.
 
 | Value                      | Meaning                                          | `stop()` acts on it? |
 | -------------------------- | ------------------------------------------------ | -------------------- |
-| `0`                        | a **real** handle — bus 0, channel 0, generation 0 | yes                |
+| `0`                        | a **real** handle -- bus 0, channel 0, generation 0 | yes                |
 | `busIndex * 2^32 + pool`   | every other real handle                          | yes                  |
-| `-1` (`Skipped`)           | nothing played — unknown/not-ready sound, locked context (queued), or throttled `playUnique()` | no |
+| `-1` (`Skipped`)           | nothing played -- unknown/not-ready sound, locked context (queued), or throttled `playUnique()` | no |
 | `-2` (`TrackStarted`)      | `playUnique()` started a music **track**         | no                   |
 
 Because `0` is real, "nothing happened" is only ever a **negative**, and negatives
-are inert to `stop()` by construction — a `play()` or `playUnique()` result is safe
+are inert to `stop()` by construction -- a `play()` or `playUnique()` result is safe
 to pass straight to `stop()` without a guard.
 
 ### Layout and limits
@@ -120,13 +120,13 @@ to pass straight to `stop()` without a guard.
   engine handle `busIndex * 2^32 + poolHandle`. Decode with `(h / 2^32) | 0` and
   `h >>> 0`.
 - **Bus ceiling: `2^21`.** The low half is a full `uint32`, so a handle is an exact
-  integer only while `busIndex ≤ 2^21 - 1` — index `2^21` itself already overflows
+  integer only while `busIndex <= 2^21 - 1` -- index `2^21` itself already overflows
   `2^53`. `init()` throws a `RangeError` above `2^21` user buses instead of issuing
   colliding handles (`'master'` is implicit and doesn't count).
-- **SMI range.** A handle leaves V8's small-integer range on any bus `≥ 1`, and on
+- **SMI range.** A handle leaves V8's small-integer range on any bus `>= 1`, and on
   bus 0 once a channel's generation passes `8,388,608` (~hours of continuous
   stealing on one channel). The boxed-double cost is below the zero-GC gate's
-  resolution — measured in [`decisions/0001`](decisions/0001-handle-namespace.md).
+  resolution -- measured in [`decisions/0001`](decisions/0001-handle-namespace.md).
   The generation counter **wraps** at `2^24` rather than retiring the channel, a
   deliberate divergence from lite-arena documented in
   [`decisions/0002`](decisions/0002-generation-wrap.md).
@@ -144,15 +144,15 @@ slice where the ecosystem has moved on:
 
 - **Web Audio is universal.** Every browser we care about (2018+) has decode +
   scheduling. HTML5 Audio fallback is dead weight for a modern game.
-- **Signals over events.** Continuous state — bus volumes, mute, load status,
-  context state — belongs in a reactive graph, not a bag of event listeners.
+- **Signals over events.** Continuous state -- bus volumes, mute, load status,
+  context state -- belongs in a reactive graph, not a bag of event listeners.
   `effect(() => busGain.setTargetAtTime(...))` is one line; the equivalent
   Howler pattern is a handful of `on('volumechange')` handlers plus manual
   ramps.
 - **Handles that survive stealing.** Voice-stealing is the norm in games. The
   underlying `AudioPool` returns generation-stamped handles; a `stop(handle)`
   after the channel has been stolen is a silent no-op instead of a wrong-voice
-  hit. Howler has no direct equivalent — `Howl.stop(id)` on an id that has
+  hit. Howler has no direct equivalent -- `Howl.stop(id)` on an id that has
   been reused is a real bug we ran into.
 - **Zero-GC hot path.** No per-play closure, no options-object allocation on
   the positional `play(id, vol, pan, pitch)` path. The pool underneath has
@@ -166,8 +166,8 @@ real budget you get back for shaders, netcode, or another 100 sounds.
 **Signals are the control surface; AudioParams are the sink.** Continuous state
 (bus volumes, mute, per-sound load state, ctx state) lives in `lite-signal`
 signals. One `effect()` per bus writes the effective target through
-`setTargetAtTime(target, ctx.currentTime, 0.01)` — click-free by construction.
-One-shot triggers (`play`) stay imperative — a sound firing is an event, not
+`setTargetAtTime(target, ctx.currentTime, 0.01)` -- click-free by construction.
+One-shot triggers (`play`) stay imperative -- a sound firing is an event, not
 state. Voices come from a per-bus `AudioPool`, addressed by
 bus-tagged handles (`busIndex * 2^32 | (gen << 8) | channel`); a stale
 `stop(handle)` after a steal is a silent no-op. Unlock is ported from
@@ -178,8 +178,8 @@ so a call fired before the first user gesture does not vanish.
 ## Music layer
 
 SFX are decoded into memory and fired through a pool; a five-minute track would be
-~50 MB of PCM for that privilege. Tracks are streamed instead —
-`MediaElementAudioSourceNode` over an `<audio>` element — and routed into the *same*
+~50 MB of PCM for that privilege. Tracks are streamed instead --
+`MediaElementAudioSourceNode` over an `<audio>` element -- and routed into the *same*
 bus graph, so one master mute and one set of faders govern both.
 
 Each track is a singleton addressed by name, with its own two-gain chain:
@@ -194,15 +194,15 @@ mix, and changing the mix mid-crossfade must not fight the curve.
 
 | Call | Does |
 | --- | --- |
-| `playTrack(name, { fadeIn?, position?, restart? })` | Start or restart. Idempotent. No-op while locked — music is scene-scale, so it is *not* queued the way SFX are. |
+| `playTrack(name, { fadeIn?, position?, restart? })` | Start or restart. Idempotent. No-op while locked -- music is scene-scale, so it is *not* queued the way SFX are. |
 | `stopTrack(name, { fade? })` | Equal-power fade out, then pause the element so the browser stops decoding. `playing` flips to `false` at once; the tail is an audio detail, not a state a HUD should show. |
-| `pauseTrack(name)` / `resumeTrack(name)` | Pause without losing position. `resumeTrack()` also restores a gain that an earlier `stopTrack()` faded away — otherwise it would decode, report itself playing, and be inaudible. |
+| `pauseTrack(name)` / `resumeTrack(name)` | Pause without losing position. `resumeTrack()` also restores a gain that an earlier `stopTrack()` faded away -- otherwise it would decode, report itself playing, and be inaudible. |
 | `crossfade(from, to, ms)` | Equal-power both sides. Either side may be `null`. A retarget mid-fade starts from where the gain actually is, so there is no discontinuity. |
 | `playExclusive(name, { fade? })` | Start `name`, fade every other playing track **on the same bus**. Other buses are untouched. |
 | `stopBus(name, { fade? })` / `stopAll({ fade? })` | Stop the pool voices *and* fade the tracks routed there. Once music lives on a bus, "stop the bus" has to mean the bus. |
 
 Loop points: `loop: true` alone uses the native `element.loop`. Add `loopEnd` and the
-engine takes over — `timeupdate` seeks back to `loopStart` on crossing it, and the
+engine takes over -- `timeupdate` seeks back to `loopStart` on crossing it, and the
 native loop is switched off (it would jump to `0`, not to `loopStart`). Note that
 `timeupdate` fires roughly four times a second, so a custom loop can overshoot by up
 to ~250 ms. For a tight musical loop, prefer an asset whose file boundaries *are* the
@@ -211,13 +211,13 @@ loop.
 ## Mix intelligence (v1.2.0)
 
 Four features, one architectural idea: **none of them fight the volume/mute effect
-for the bus gain param.** A second gain node is spliced under every bus —
+for the bus gain param.** A second gain node is spliced under every bus --
 
 ```
 pool / track -> gain (volume + mute) -> duckGain (sidechain) -> master
 ```
 
-— and ducking and snapshot morphs live on `duckGain`, so they *compose* with volume
+-- and ducking and snapshot morphs live on `duckGain`, so they *compose* with volume
 and mute (the graph multiplies them) instead of two automations clobbering one
 `AudioParam`. Meters, the duck follower, and auto-suspend share a single cold
 ~10 Hz monitor that never touches `play()`/`stop()`. The monitor tick is proven to
@@ -233,7 +233,7 @@ audio.stopDuck('music');                                    // recover
 audio.duckOn('sfx', 'music', { threshold: 2, level: 0.3 });
 ```
 
-`setTargetAtTime` is the engine's bus-write primitive and is exactly right here —
+`setTargetAtTime` is the engine's bus-write primitive and is exactly right here --
 an exponential approach with a time constant *is* a compressor release. Attack and
 release are **separate** because a symmetric duck sounds wrong: music should get out
 of the way fast and return slowly. An explicit `duck()` always wins over the
@@ -247,10 +247,10 @@ audio.captureSnapshot('gameplay');
 audio.applySnapshot('paused', 400);   // morph over 400 ms
 ```
 
-Capture records every bus's volume and mute (not track volumes — a snapshot is the
+Capture records every bus's volume and mute (not track volumes -- a snapshot is the
 *desk*). Apply sets the signals to the target immediately, so every readout is
 instantly truthful, and carries the `ms`-long audible transition on the sidechain,
-continuous from the **actual current level** — so a snapshot applied mid-morph, or
+continuous from the **actual current level** -- so a snapshot applied mid-morph, or
 mid-duck, is click-free. See `decisions/0004-snapshots.md`.
 
 ### Per-bus meters + dynamic buses
@@ -264,7 +264,7 @@ const level = audio.level('ambient');   // ReadSignal<number>, RMS at ~10 Hz
 handle ceiling is re-checked at runtime, so a bus created past it fails closed with
 a `RangeError` rather than issuing colliding handles. `{ meter: true }` taps an
 `AnalyserNode` post-duck and reads RMS into **one** pre-allocated `Float32Array` per
-bus — zero allocation per read. An unmetered bus allocates no analyser and
+bus -- zero allocation per read. An unmetered bus allocates no analyser and
 `level()` returns `null`. See `decisions/0006-dynamic-bus.md`.
 
 ### Spatial buses: positional and HRTF
@@ -330,68 +330,97 @@ widener nodes, no new hot-path branch).
 >   widener is stereo-only, `width > 0` on a `positional` / `hrtf` bus is a
 >   construction-time `RangeError` -- it does not compose with per-voice panning.
 
-### Discrete surround (7+1) and output-layout detection (v2.4.0)
+### Discrete surround (7+1 / 5+1 / 3+1) and output-layout detection (v2.4.0, subsets v2.5.0)
 
 ```js
-audio.layoutOf();                                          // -> '7.1' | 'stereo'
-audio.createBus('surround', { spatial: 'discrete', preset: '7.1' });
-audio.effectiveLayoutOf('surround');                       // -> '7.1' on an 8ch sink, 'stereo' on a 2ch sink
+audio.layoutOf();                                          // -> '7.1' | '5.1' | '3.1' | 'stereo'
+audio.createBus('surround', { spatial: 'discrete', preset: '7.1' });   // or '5.1' / '3.1'
+audio.effectiveLayoutOf('surround');                       // the BUILT layout after the ladder
 // same setPosition() as positional/hrtf -- one zero-alloc scalar stamp:
 const h = audio.play('explosion', 1, 0, 1);
-audio.setPosition(h, x, y, z);                             // 8 lane gains solved on the ~10 Hz monitor
+audio.setPosition(h, x, y, z);                             // lane gains solved on the ~10 Hz monitor
 ```
 
 At `init()` the engine resolves its output layout **once** from
-`destination.maxChannelCount`, fail-closed: only a concrete integer `>= 8` earns
-`'7.1'`; every other reading is `'stereo'`. `null` is not zero -- an unknown sink
-is stereo, never optimistically 7.1.
+`destination.maxChannelCount` -- the **richest single layout** the sink can carry,
+fail-closed: any non-integer / `NaN` / `null` / absent reading is `'stereo'`,
+never an optimistic upgrade.
 
 | `destination.maxChannelCount` | `layoutOf()` | Why |
 | ----------------------------- | ------------ | --- |
-| `8`, `12`, any integer `>= 8` | `'7.1'`      | a concrete surround sink |
-| `2`, `4`, `6`                 | `'stereo'`   | fewer than 8 channels (no `5.1`/`3.1` until a later release) |
+| `8`, `12`, any integer `>= 8` | `'7.1'`      | a full surround sink |
+| `6` or `7`                    | `'5.1'`      | a 6-channel sink |
+| `4` or `5`                    | `'3.1'`      | a 4-channel sink |
+| `2`, any integer `< 4`        | `'stereo'`   | too few channels |
 | `7.5` (non-integer)           | `'stereo'`   | not an integer channel count |
 | `'8'` (string)                | `'stereo'`   | not a `number` |
 | `undefined` / `null` / `NaN`  | `'stereo'`   | unverified -- fail closed |
 | property absent / no `destination` | `'stereo'` | nothing to trust |
 
-`{ spatial: 'discrete', preset: '7.1' }` builds a 7+1 bus (8 SMPTE lanes:
-`L R C LFE SL SR SBL SBR`) on the pool's discrete mode with per-voice **VBAP**
-panning driven by the same `setPosition()` -- but **only** when `layoutOf()` is
-`'7.1'`. On a smaller sink the request transparently **falls back to a working
-stereo bus** and `effectiveLayoutOf('surround')` returns `'stereo'` so you can see
-it. That fallback is **correct, not a failure**:
+> [!NOTE]
+> **v2.5.0 behavior change.** A real 4- or 6-channel sink that returned `'stereo'`
+> under v2.4.0 now returns `'3.1'` / `'5.1'`. The two v2.4.0 tokens keep their
+> meaning: `=== '7.1'` still holds only on a `>= 8` sink; the change is visible
+> only to a `=== 'stereo'` caller on a real 4/6-channel sink. A 2-channel sink is
+> unchanged (still `'stereo'`).
 
-| Sink                                   | `effectiveLayoutOf()` | Behaviour |
-| -------------------------------------- | --------------------- | --------- |
-| `>= 8` channels                        | `'7.1'`               | 8 lanes, VBAP panning, LFE send |
-| `< 8` channels (incl. a 2ch headset)   | `'stereo'`            | a plain stereo bus that plays normally |
+`{ spatial: 'discrete', preset }` builds a discrete bus on the pool's matching
+`channels: 8 | 6 | 4` mode with per-voice **VBAP** panning driven by the same
+`setPosition()`. The requested preset resolves down a cold **fallback ladder** to
+the largest layout the sink actually fits -- `min(requested, sink)` stepped down
+`7.1 -> 5.1 -> 3.1 -> stereo`. A request **never upgrades** (a `'5.1'` request on
+an 8-channel sink stays `'5.1'`); it only steps down. `effectiveLayoutOf(name)`
+returns the **built** token so you can see where it landed:
 
-The 8 lane gains are solved on the cold `~10 Hz` monitor: `az = atan2(x, -z)`
-picks a constant-power speaker pair on a seven-lane ring
-(`g1 = cos(f*PI/2)`, `g2 = sin(f*PI/2)`), the LFE lane (index 3) gets an
-azimuth-invariant distance-only send (never a pan gain), and `y` (height) has no
-7+1 lane and is deliberately **not panned**. All 8 gains ride the same `20 ms` /
-`~10 Hz` `setTargetAtTime` cadence as position, into one reused
+| requested \ sink | `>= 8` | `6`/`7` | `4`/`5` | `< 4` |
+| ---------------- | ------ | ------- | ------- | ----- |
+| `'7.1'`          | `7.1`  | `5.1`   | `3.1`   | `stereo` |
+| `'5.1'`          | `5.1`  | `5.1`   | `3.1`   | `stereo` |
+| `'3.1'`          | `3.1`  | `3.1`   | `3.1`   | `stereo` |
+
+When even `3.1` does not fit (`< 4` channels, including a 2-channel headset) the
+request transparently **falls back to a working stereo bus** (`lanes = 0`) that
+plays normally, and `effectiveLayoutOf()` returns `'stereo'`. That fallback is
+**correct, not a failure**. Each preset's SMPTE lanes (shared low indices; a
+smaller preset drops the higher lanes):
+
+| preset | lanes | ring |
+| ------ | ----- | ---- |
+| `'7.1'` | 8 | `L R C LFE SL SR SBL SBR` |
+| `'5.1'` | 6 | `L R C LFE SL SR` (drop `SBL`/`SBR`) |
+| `'3.1'` | 4 | `L R C LFE` (front-only, drop all surrounds) |
+
+The lane gains are solved on the cold `~10 Hz` monitor by one **data-driven**
+solver over a per-preset frozen ring record: `az = atan2(x, -z)` picks a
+constant-power speaker pair on the ring (`g1 = cos(f*PI/2)`, `g2 = sin(f*PI/2)`),
+the LFE lane (**index 3 in every preset**) gets an azimuth-invariant distance-only
+send (never a pan gain), and `y` (height) is deliberately **not panned**. The
+flush writes exactly `lanes` gains (8/6/4) with **no per-tick preset branch**, at
+the same `20 ms` / `~10 Hz` `setTargetAtTime` cadence as position, into one reused
 `Float32Array(8)` -- zero allocation.
 
 > [!CAUTION]
-> **The 8-lane render needs a real `>= 8`-channel sink, and the destination mutation is process-global.**
+> **The multichannel render needs a real `>= 4`/`>= 6`/`>= 8`-channel sink, and the destination mutation is process-global.**
 > - **The audible surround is only reachable on a true multichannel sink.** A
 >   virtual-surround headset that reports `maxChannelCount 2` (the common case) gets
 >   the **stereo fallback** -- that is the shipped, correct behaviour there, not a
 >   bug. Do **not** stack an engine-side `'hrtf'` bus on top of a headset that already
 >   virtualizes; `'discrete'` and `'hrtf'` are one `spatial` field and cannot combine
 >   anyway.
-> - **`destination.channelCount` is mutated once, process-wide.** Building the first
->   discrete pool sets the destination to `8` / `'explicit'` / `'discrete'` (restored
->   on `destroy()`). This changes downmix for the whole context, so mixing a discrete
->   bus with an assumed-stereo external graph on the same `AudioContext` is
->   unsupported. An engine with no discrete bus never touches the destination.
-> - **`preset` is `'7.1'`-only and discrete does not compose with `width`.** `'5.1'`
->   and `'3.1'` reject loudly (a later release) rather than degrade silently, a
->   `preset` on a non-discrete bus is a `RangeError`, and `width > 0` on a discrete
->   bus is a `RangeError` (the stereo widener is stereo-only).
+> - **`3.1` is front-only.** With no rear speakers, a source directly behind the
+>   listener folds across the 300-degree back gap between `R` (30 degrees) and `L`
+>   (330 degrees). Correct for a front-only rig, a documented limitation, not a bug.
+> - **`destination.channelCount` is mutated once, process-wide.** It is set to the
+>   **max lane count across live discrete buses** (`8`/`6`/`4`, monotonic) with
+>   `'explicit'` / `'discrete'`; the pristine triple is saved on the first discrete
+>   pool build and restored on `destroy()`. This changes downmix for the whole
+>   context, so mixing a discrete bus with an assumed-stereo external graph on the
+>   same `AudioContext` is unsupported. An engine with no discrete bus never touches
+>   the destination.
+> - **`preset` is discrete-only and does not compose with `width`.** A `preset` on a
+>   non-discrete bus is a `RangeError`, an unknown preset is a `RangeError`, and
+>   `width > 0` on a discrete bus is a `RangeError` (the stereo widener is
+>   stereo-only).
 
 ### Auto-suspend
 
@@ -402,8 +431,8 @@ if (audio.enableAutoSuspend({ after: 20 })) { /* armed (false on iOS) */ }
 After N silent seconds the context is suspended to stop the hardware spinning; the
 next `play()` wakes it. The wake is one monomorphic branch that fires a bare
 `resume()` and lets the native scheduler hold the triggering voice against the
-frozen clock — no await, no microtask, no allocation. **Off by default, and refused
-on iOS**, where a suspend→resume can demand a fresh gesture and silently un-unlock a
+frozen clock -- no await, no microtask, no allocation. **Off by default, and refused
+on iOS**, where a suspend->resume can demand a fresh gesture and silently un-unlock a
 working page. See `decisions/0005-auto-suspend.md`.
 
 ## Signal readouts (the whole reactive surface)
@@ -447,13 +476,13 @@ its `buses` with the defaults):
 audio.createBus('pad', {
     meter:   false,       // tap an AnalyserNode for level() readouts
     spatial: 'stereo',    // 'stereo' | 'positional' | 'hrtf' | 'discrete' (per-voice pan mode)
-    preset:  '7.1',       // discrete-only: the 7+1 lane preset (S6 ships '7.1')
+    preset:  '7.1',       // discrete-only lane preset: '7.1' | '5.1' | '3.1' (ladder picks the fit)
     width:   0,           // 0..1 arms the mono-safe Haas widener; omit to leave mono
 });
 ```
 
 - `width` is **omit-to-disable**: leaving it out builds no widener nodes (byte-identical to prior releases); a number in `[0, 1]` arms it and enables `setWidth()`. A non-finite / boolean / out-of-range value, or `width > 0` on a `positional`/`hrtf`/`discrete` bus, is a construction-time `RangeError`. A non-mono loaded source disarms it (see the Stereo width caution above).
-- `spatial: 'discrete'` builds a 7+1 surround bus **only** when `layoutOf()` is `'7.1'` (a sink reporting `>= 8` channels); on a smaller sink it falls back to a working stereo bus and `effectiveLayoutOf(name)` reports `'stereo'` (correct, not a failure). `preset` is valid only with `spatial: 'discrete'` (a `RangeError` elsewhere), S6 ships only `'7.1'`, and `'5.1'`/`'3.1'` reject loudly rather than degrade. See the Discrete surround section above.
+- `spatial: 'discrete'` builds a discrete surround bus in the pool's matching `channels: 8 | 6 | 4` mode; the requested `preset` (`'7.1'` | `'5.1'` | `'3.1'`) resolves down the fallback ladder to the largest layout the sink fits, and on a `< 4`-channel sink it falls back to a working stereo bus with `effectiveLayoutOf(name)` reporting `'stereo'` (correct, not a failure). A request never upgrades. `preset` is valid only with `spatial: 'discrete'` (a `RangeError` elsewhere); an unknown preset is a `RangeError`. See the Discrete surround section above.
 
 ## Migration from lite-audio-manager
 
@@ -469,7 +498,7 @@ player's saved mute preference intact on first launch.
 + import { audioManager } from '@zakkster/lite-audio/compat';
 ```
 
-`./compat` exports an `AudioManager`-shaped adapter over `LiteAudio` — same
+`./compat` exports an `AudioManager`-shaped adapter over `LiteAudio` -- same
 `init`/`play`/`playExclusive`/`playUnique`/`stop`/`stopCategory`/`setMuted`/
 `destroy` surface, same `isMuted`/`isUnlocked`, same `'mutechange'` event, same
 `lite_audio_muted` key. No Howler underneath: the swap *removes* a runtime
@@ -489,13 +518,13 @@ npm test
 153 tests across 43 suites. The unlock state machine (including `'interrupted'`),
 loader fallback + error, bus writes as `setTargetAtTime`, pool delegation (steal,
 generation no-op on stale handles, bus scope), unlock queue semantics
-(latest-per-sound, bounded), destroy idempotency — plus the whole music layer
+(latest-per-sound, bounded), destroy idempotency -- plus the whole music layer
 (`test/Tracks.test.js`), the bus-handle namespace (`test/BusHandles.test.js`), the
 handle contract (`test/Handles.test.js`): every encoding pinned by name, including
 `stop(0)` reaching the real bus-0 voice, `stop(-2)` staying inert, the real engine
 leaving SMI range past generation 8,388,608, and the `2^21` bus ceiling failing
-closed — and the mix-intelligence suite (`test/MixIntelligence.test.js`): the duck
-curve on the mock clock (attack ≠ release, edge-only, explicit-wins), snapshot
+closed -- and the mix-intelligence suite (`test/MixIntelligence.test.js`): the duck
+curve on the mock clock (attack != release, edge-only, explicit-wins), snapshot
 round-trip and sidechain-morph continuity, meter RMS and buffer reuse, the
 auto-suspend cycle with its play()-wake and iOS refusal, and the runtime bus
 ceiling.
@@ -511,11 +540,11 @@ CHANGELOG-noted re-baseline rather than an accident.
 node --expose-gc test/torture.mjs
 ```
 
-Measures the handle return on bus `≥ 1` and past generation `8,388,608` — the
-cases where it leaves SMI range and where the old bus-0/low-gen gate was blind —
+Measures the handle return on bus `>= 1` and past generation `8,388,608` -- the
+cases where it leaves SMI range and where the old bus-0/low-gen gate was blind --
 reports `bytesPerOp` per regime, and (v1.2.0) adds a second phase that builds a
 **live engine with all four mix features active** and measures the shared monitor
-tick — 0 bytes/op retained. It is **falsifiable**:
+tick -- 0 bytes/op retained. It is **falsifiable**:
 
 ```bash
 LITEAUDIO_TORTURE_LEAK=1 node --expose-gc test/torture.mjs   # exits non-zero
@@ -544,7 +573,7 @@ The mock harness (`test/mock-ctx.js`) records every `AudioParam` scheduled event
 into an inspectable `.events` array **and settles `.value` on whatever the
 automation is heading for**. That second half matters more than it sounds: a
 harness that only records schedules can prove a fade-out was *scheduled* while
-saying nothing about whether the gain ended up silent — and "scheduled a fade-out"
+saying nothing about whether the gain ended up silent -- and "scheduled a fade-out"
 plus "still audible" is exactly the shape of a real bug this suite now catches. It
 also runs a real context state machine (all four states), mocks `fetch` +
 `decodeAudioData` with length-hint payloads, and hands out `<audio>` elements and

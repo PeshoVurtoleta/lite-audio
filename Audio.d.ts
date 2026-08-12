@@ -128,13 +128,15 @@ export interface CreateBusOptions {
     spatial?: 'stereo' | 'positional' | 'hrtf' | 'discrete';
 
     /**
-     * Discrete-surround preset for a `spatial: 'discrete'` bus (S6). S6 ships one
-     * preset, '7.1' (8 lanes: L R C LFE SL SR SBL SBR). Only valid with
-     * spatial: 'discrete' -- a preset on any other bus fails closed (RangeError),
-     * and '5.1'/'3.1' reject loudly (they land in a later release) rather than
-     * silently degrade. Defaults to '7.1' when spatial is 'discrete'.
+     * Discrete-surround preset for a `spatial: 'discrete'` bus (S6/S7). Three presets
+     * ship: '7.1' (8 lanes: L R C LFE SL SR SBL SBR), '5.1' (6 lanes: drop SBL/SBR) and
+     * '3.1' (4 lanes: front-only, drop all surrounds). Each builds the largest layout the
+     * sink actually fits via the fallback ladder (7.1 -> 5.1 -> 3.1 -> stereo);
+     * effectiveLayoutOf() reports the built token. A request never upgrades. Only valid
+     * with spatial: 'discrete' -- a preset on any other bus fails closed (RangeError).
+     * Defaults to '7.1' when spatial is 'discrete'.
      */
-    preset?: '7.1';
+    preset?: '7.1' | '5.1' | '3.1';
 
     /**
      * Arm a stereo Haas widener on this bus and enable setWidth() (S5). A number
@@ -344,21 +346,23 @@ export class LiteAudio {
     // ---------- Output layout (S6) -----------------------------------------
 
     /**
-     * The engine's DETECTED output layout, resolved once at init() and cached:
-     * '7.1' when the sink reported a concrete integer >= 8 hardware channels, else
-     * 'stereo' (the fail-closed default for every unverified sink). A mid-session
-     * device change does not re-detect. See decisions/0008.
+     * The engine's DETECTED output layout: the richest single layout the sink can carry,
+     * resolved once at init() and cached. '7.1' on a concrete integer >= 8 channels,
+     * '5.1' on 6 or 7, '3.1' on 4 or 5, else 'stereo' (the fail-closed default for every
+     * unverified sink: < 4, non-integer, NaN, null, absent). A mid-session device change
+     * does not re-detect. See decisions/0008, 0009.
      */
-    layoutOf(): '7.1' | 'stereo';
+    layoutOf(): '7.1' | '5.1' | '3.1' | 'stereo';
 
     /**
-     * A discrete bus's EFFECTIVE layout: '7.1' when its 8 lanes were actually built,
-     * 'stereo' when a discrete request fell back (a sink under 8 channels), or null
-     * on a non-discrete bus or an unknown name. This is how a caller learns whether
-     * the fallback happened -- a discrete request on a 2ch sink returns 'stereo'
-     * here, and that is correct, not an error.
+     * A discrete bus's EFFECTIVE layout: the BUILT preset token ('7.1'/'5.1'/'3.1') after
+     * the request was stepped down the fallback ladder to fit the sink, 'stereo' when the
+     * request fell all the way back, or null on a non-discrete bus or an unknown name.
+     * This is how a caller learns whether -- and how far -- the fallback stepped: a '7.1'
+     * request on a 6ch sink returns '5.1'; a discrete request on a 2ch sink returns
+     * 'stereo'. Distinct from layoutOf() (sink capability vs per-bus built layout).
      */
-    effectiveLayoutOf(busName: string): '7.1' | 'stereo' | null;
+    effectiveLayoutOf(busName: string): '7.1' | '5.1' | '3.1' | 'stereo' | null;
 
     // ---------- Mix intelligence (v1.2.0) ----------------------------------
 

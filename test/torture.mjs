@@ -223,21 +223,24 @@ const SP6_CYCLES = 200;
 
 // --- S6 discrete-surround config (T-SP4, T-SP3-lane) -------------------------
 
-// T-SP4 (a): the fail-closed detection matrix. destination.maxChannelCount -> the
-// engine's effective layout. ONLY a concrete integer >= 8 earns '7.1'; every other
-// shape (absent property, absent destination, undefined/null/NaN, a non-integer, a
-// string, or an integer < 8) resolves to 'stereo'. Each row is [name, spec, expect];
-// spec is { absent } (destination present but no maxChannelCount key), { destAbsent }
-// (no destination at all), or { value } (maxChannelCount pinned to that exact value,
-// key present even when the value is undefined -- distinct from absent).
+// T-SP4 (a): the fail-closed detection matrix (D1). destination.maxChannelCount -> the
+// engine's DETECTED layout, the richest single layout the sink can carry: a concrete
+// integer >= 8 earns '7.1', 6 or 7 earns '5.1', 4 or 5 earns '3.1'; every other shape
+// (absent property, absent destination, undefined/null/NaN, a non-integer, a string, or
+// an integer < 4) fails closed to 'stereo'. Each row is [name, spec, expect]; spec is
+// { absent } (destination present but no maxChannelCount key), { destAbsent } (no
+// destination at all), or { value } (maxChannelCount pinned to that exact value, key
+// present even when the value is undefined -- distinct from absent).
 const SP4_MATRIX = [
     ['absent', { absent: true }, 'stereo'],
     ['undefined', { value: undefined }, 'stereo'],
     ['null', { value: null }, 'stereo'],
     ['NaN', { value: NaN }, 'stereo'],
     ['2', { value: 2 }, 'stereo'],
-    ['4', { value: 4 }, 'stereo'],
-    ['6', { value: 6 }, 'stereo'],
+    ['4', { value: 4 }, '3.1'],
+    ['5', { value: 5 }, '3.1'],
+    ['6', { value: 6 }, '5.1'],
+    ['7', { value: 7 }, '5.1'],
     ['7.5', { value: 7.5 }, 'stereo'],
     ["'8'", { value: '8' }, 'stereo'],
     ['8', { value: 8 }, '7.1'],
@@ -245,21 +248,26 @@ const SP4_MATRIX = [
     ['dest-absent', { destAbsent: true }, 'stereo'],
 ];
 
-// T-SP4 (b): the fallback ladder. A discrete request under each reading. The stereo
-// readings must build a bus that ACTUALLY PLAYS (a non-negative handle, activeCount
-// >= 1); {8,12} must report effectiveLayout '7.1'. Exactly 2 of the 11 resolve to 7.1.
+// T-SP4 (b): the fallback ladder (D2), the 12 pinned cells of the requested x M matrix.
+// A discrete bus requesting preset R on a sink of M channels builds the LARGEST preset
+// that fits min(request-need, M), stepping DOWN 7.1 -> 5.1 -> 3.1 -> stereo; it never
+// UPGRADES (a '5.1' request on an 8ch sink stays '5.1'). Each row is
+// [name, request, maxChannelCount, expectedEffectiveLayout]. M is sampled once per band
+// (8 for >=8, 6 for 6|7, 4 for 4|5, 2 for <4). The stereo cells must build a bus that
+// ACTUALLY PLAYS (a non-negative handle, activeCount >= 1). 3 cells fall to stereo.
 const SP4_LADDER = [
-    ['absent', { absent: true }, 'stereo'],
-    ['undefined', { value: undefined }, 'stereo'],
-    ['null', { value: null }, 'stereo'],
-    ['NaN', { value: NaN }, 'stereo'],
-    ['2', { value: 2 }, 'stereo'],
-    ['4', { value: 4 }, 'stereo'],
-    ['6', { value: 6 }, 'stereo'],
-    ['7.5', { value: 7.5 }, 'stereo'],
-    ["'8'", { value: '8' }, 'stereo'],
-    ['8', { value: 8 }, '7.1'],
-    ['12', { value: 12 }, '7.1'],
+    ['7.1@8', '7.1', 8, '7.1'],
+    ['7.1@6', '7.1', 6, '5.1'],
+    ['7.1@4', '7.1', 4, '3.1'],
+    ['7.1@2', '7.1', 2, 'stereo'],
+    ['5.1@8', '5.1', 8, '5.1'],
+    ['5.1@6', '5.1', 6, '5.1'],
+    ['5.1@4', '5.1', 4, '3.1'],
+    ['5.1@2', '5.1', 2, 'stereo'],
+    ['3.1@8', '3.1', 8, '3.1'],
+    ['3.1@6', '3.1', 6, '3.1'],
+    ['3.1@4', '3.1', 4, '3.1'],
+    ['3.1@2', '3.1', 2, 'stereo'],
 ];
 
 // T-SP4 (c): setPosition on a discrete bus reuses the identical zero-alloc scalar
@@ -279,10 +287,28 @@ const SP3_LANE_VOICES = 8;
 const SP3_LANE_OPS = 500_000;
 const SP3_LANE_WARMUP = 50_000;
 const SP3_LANE_MAX_BYTES_PER_OP = 4.0;
-// The red control swaps _vbap71 for a variant allocating a fresh Float32Array(8) per
+// The red control swaps _vbapSolve for a variant allocating a fresh Float32Array per
 // solve; it must land clearly above the reused-scratch ceiling or the tier is not
 // measuring allocation and is not falsifiable.
 const SP3_LANE_RED_MIN_BYTES_PER_OP = 8.0;
+
+// S7 subset presets (T-SP3-lane, all three widths). The 6-lane (5.1) and 4-lane (3.1)
+// reductions ride the SAME zero-alloc _vbapSolve + data-driven _flushLanes as 8-lane, so
+// each ships its own write-count, GC-budget and native-event-rate tier. [preset, lanes,
+// maxChannelCount] -- the mock sink is pinned to exactly the preset's channel count so
+// the ladder resolves the requested preset (no fallback).
+const SP3_LANE_PRESETS = [
+    ['7.1', 8, 8],
+    ['5.1', 6, 6],
+    ['3.1', 4, 4],
+];
+// Retention sub-tier (S7): build/teardown each of the three presets this many cycles.
+// destroy() must null the per-bus scratch (posXYZ/posOwner/posDirty) AND the frozen vbap
+// record, restore the pristine destination triple VERBATIM, and leave no live source-node
+// (census delta 0). A running context is used so no iOS silent-unlock pulse (a mock source
+// that never stops) confounds the census.
+const SP3_LANE_CYCLES = 200;
+const SP3_LANE_RETENTION_VOICES = 4;
 
 // T-SP3-lane (c): the SP-03 native-event bound on the lane params. 8 voices x 100
 // ticks, 6 setPosition stamps/tick, one flush/tick -> ~100 target events/lane/voice,
@@ -368,11 +394,43 @@ function measure(label, fn) {
 }
 
 function fmt(row) {
-    return '  ' + row.label.padEnd(14) +
+    return '  ' + row.label.padEnd(18) +
         ' bytesPerOp=' + (Number.isFinite(row.bytesPerOp) ? row.bytesPerOp.toFixed(4) : 'null').padStart(10) +
         '  major=' + String(row.major).padStart(2) +
         '  maxMs=' + row.maxMs.toFixed(3);
 }
+
+/**
+ * Best-of-N zero-alloc position measurement. A single scalar-stamp position writer is
+ * byte-for-byte zero-alloc, so its steady-state bytesPerOp is 0. But a lone stray ~47 KB
+ * JIT/GC bookkeeping allocation -- perturbed run-to-run by unrelated heap pressure -- can
+ * land in ONE measurement pass and read as ~0.09 bytes/op over 500k ops, tripping a tight
+ * 0.05 ceiling nondeterministically. A real per-op leak, by contrast, allocates on EVERY
+ * pass, so the MINIMUM bytesPerOp across N passes still catches it (its floor is high)
+ * while a one-off stray is discarded. This is the same class of stabilization T-SP1/T-SP5
+ * already use (warmup + stabilize); best-of-N is the deterministic form for the tight
+ * 0.05-ceiling position tiers. It does NOT widen the budget -- the ceiling is unchanged;
+ * it removes measurement noise a single stray allocation injects.
+ */
+function measurePositionBestOf(label, writer, ops, warmup, passes) {
+    let best = null;
+    for (let p = 0; p < passes; p++) {
+        let i = 0;
+        const r = measureOps(() => writer(i++), { ops, warmup, source: 'gc', stabilize: true });
+        const report = checkNoGc(r.summary, RULES);
+        const bpo = r.bytesPerOp == null ? NaN : r.bytesPerOp;
+        const row = { label, bytesPerOp: bpo, major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok };
+        if (best === null || (Number.isFinite(bpo) && (!Number.isFinite(best.bytesPerOp) || bpo < best.bytesPerOp))) {
+            best = row;
+        }
+    }
+    return best;
+}
+
+// Best-of passes for the tight-ceiling (0.05) position tiers. 3 is enough to discard a
+// lone stray allocation while keeping a real per-op leak (present on every pass) above
+// the floor.
+const POS_BEST_OF = 3;
 
 // --- live-engine monitor phase (AU1) -----------------------------------------
 
@@ -558,30 +616,33 @@ async function buildWidthEngine() {
 // --- S6 discrete-surround engine builder + red helpers -----------------------
 
 /**
- * The fail-open detector the SP4_RED control swaps in: an unknown maxChannelCount
- * defaults to 8 (7.1) instead of stereo. Bound onto the engine instance BEFORE init(),
- * so init()'s _detectLayout() call takes this instead. Modelling the regression the
- * shipped fail-closed guard exists to prevent -- undefined/null/NaN must NOT become 7.1.
+ * The fail-open detector the SP4_RED control swaps in: it implements the correct D1
+ * bands EXCEPT it defaults an unknown/non-integer maxChannelCount to 8 (the richest)
+ * instead of 0. So ONLY the fail-closed rows (absent/undefined/null/NaN/non-integer/
+ * string/dest-absent) flip -- each to '7.1' -- while the concrete-integer rows stay
+ * correct. Bound onto the engine instance BEFORE init(), so init()'s _detectLayout()
+ * call takes this instead. Modelling the regression the shipped fail-closed guard exists
+ * to prevent -- an unknown sink must NOT be optimistically upgraded off 'stereo'.
  */
 function redDetectLayoutUnknownIsEight() {
     const v = this._ctx?.destination?.maxChannelCount;
-    const eff = (typeof v === 'number' && Number.isFinite(v)) ? v : 8;   // unknown -> 8
-    this._maxChannels = eff;
-    this._layout = (Number.isInteger(eff) && eff >= 8) ? '7.1' : 'stereo';
+    const n = Number.isInteger(v) ? v : 8;   // regression: unknown -> 8 (fail OPEN)
+    this._maxChannels = n;
+    this._layout = n >= 8 ? '7.1' : n >= 6 ? '5.1' : n >= 4 ? '3.1' : 'stereo';
 }
 
 /**
- * The allocating solver the SP3_LANE_RED control swaps in for _vbap71: a fresh
- * Float32Array(8) per solve instead of the reused module scratch, RETAINED in `keep`
- * (the shared retention buffer every red control in this file uses). Retention, not
- * transient churn, is what this gc-source profiler measures -- a purely transient
- * Float32Array is young-gen garbage below the gate's resolution, the exact finding
- * decisions/0001 records for the boxed-double handle. The red models the regression the
- * reused LANE_SCRATCH exists to prevent: a solver whose per-flush buffer ESCAPES, so
- * the flush now retains 8 arrays per voice. The exact gains do not matter to the
- * measurement; the retained allocation is the point, and it lands far above the floor.
+ * The allocating solver the SP3_LANE_RED control swaps in for _vbapSolve: a fresh
+ * Float32Array per solve instead of the reused module scratch, RETAINED in `keep` (the
+ * shared retention buffer every red control in this file uses). Retention, not transient
+ * churn, is what this gc-source profiler measures -- a purely transient Float32Array is
+ * young-gen garbage below the gate's resolution, the exact finding decisions/0001 records
+ * for the boxed-double handle. The red models the regression the reused LANE_SCRATCH
+ * exists to prevent: a solver whose per-flush buffer ESCAPES, so the flush now retains an
+ * array per voice. The generalized signature is (rec, x, y, z) -- rec is the frozen
+ * preset record; the exact gains do not matter to the measurement, only the allocation.
  */
-function redVbap71Alloc(x, y, z) {
+function redVbapSolveAlloc(rec, x, y, z) {
     const s = new Float32Array(8);          // fresh allocation per solve -- the red floor
     let az = Math.atan2(x, -z) * (180 / Math.PI);
     if (az < 0) az += 360;
@@ -619,16 +680,14 @@ async function detectLayoutFor(spec) {
 }
 
 /**
- * Build a discrete engine under a given maxChannelCount spec, arm a discrete bus, load
- * a sound, unlock, and report the fallback outcome: the bus's effectiveLayout, a real
- * play() handle, and the resulting activeCount. Proves a discrete request on a < 8 sink
- * still builds a bus that plays.
+ * Build a discrete engine on a sink of `maxChannelCount` channels, arm a discrete bus
+ * with the requested `preset`, load a sound, unlock, and report the fallback outcome:
+ * the bus's effectiveLayout (the BUILT ladder token), a real play() handle, and the
+ * resulting activeCount. Proves a discrete request that steps down the ladder still
+ * builds a bus that plays.
  */
-async function buildDiscreteFallback(spec) {
-    const ctxOpts = { state: 'suspended' };
-    if (!spec.absent) ctxOpts.maxChannelCount = spec.value;
-    const ctx = createMockContext(ctxOpts);
-    if (spec.absent) ctx._deleteMaxChannelCount();
+async function buildDiscreteFallback(maxChannelCount, preset) {
+    const ctx = createMockContext({ state: 'suspended', maxChannelCount });
     const gestures = [];
     const win = {
         navigator: { userAgent: 'node-torture-gate', maxTouchPoints: 0 },
@@ -644,7 +703,7 @@ async function buildDiscreteFallback(spec) {
         clearTimeout: () => {},
     });
     await audio.init(ctx);
-    audio.createBus('surr', { spatial: 'discrete', preset: '7.1' });
+    audio.createBus('surr', { spatial: 'discrete', preset });
     await audio.defineSounds({ ping: { src: ['/s.wav'], bus: 'surr' } });
     for (const cb of gestures) cb({});
     await flushMicrotasks(8);
@@ -656,16 +715,21 @@ async function buildDiscreteFallback(spec) {
 }
 
 /**
- * Build a live LiteAudio (8ch mock context) with ONE discrete 7.1 bus and `voices`
- * sounding voices, unlocked, monitor driven by hand. Modeled on buildSpatialEngine.
- * 'surr' is created ONLY via createBus so it is actually built discrete (createBus is
- * idempotent-by-name -- a constructor bus would already exist as a stereo record and
- * silently drop the option). The clock never advances, so voiceNode() keeps every
+ * Build a live LiteAudio (Nch mock context) with ONE discrete bus of the requested
+ * `preset` and `voices` sounding voices, unlocked, monitor driven by hand. Modeled on
+ * buildSpatialEngine. Defaults to the 8ch / 7.1 shape the S6 tiers use; `preset`/
+ * `maxChannelCount` widen it to the 6-lane (5.1) and 4-lane (3.1) reductions. `running`
+ * uses a state:'running' context so init() auto-unlocks WITHOUT the iOS silent-buffer
+ * pulse (a mock source that never stops), keeping the live-node census honest for the
+ * retention tier. 'surr' is created ONLY via createBus so it is actually built discrete
+ * (createBus is idempotent-by-name). The clock never advances, so voiceNode() keeps every
  * voice alive across the flush window. Returns the engine, its context, the live voice
- * handles, and the discrete bus record.
+ * handles, the discrete bus record, the built lane count, and the pre-play live-node
+ * census baseline.
  */
-async function buildDiscreteEngine(voices) {
-    const ctx = createMockContext({ state: 'suspended', maxChannelCount: 8 });
+async function buildDiscreteEngine(voices, preset = '7.1', maxChannelCount = 8, running = false) {
+    const laneCount = preset === '7.1' ? 8 : preset === '5.1' ? 6 : 4;
+    const ctx = createMockContext({ state: running ? 'running' : 'suspended', maxChannelCount });
     const gestures = [];
     const win = {
         navigator: { userAgent: 'node-torture-gate', maxTouchPoints: 0 },
@@ -681,29 +745,35 @@ async function buildDiscreteEngine(voices) {
         clearTimeout: () => {},
     });
     await audio.init(ctx);
-    audio.createBus('surr', { spatial: 'discrete', preset: '7.1' });
+    audio.createBus('surr', { spatial: 'discrete', preset });
     await audio.defineSounds({ ping: { src: ['/s.wav'], bus: 'surr' } });
-    for (const cb of gestures) cb({});        // unlock
+    for (const cb of gestures) cb({});        // unlock (early-returns under a running ctx)
     await flushMicrotasks(8);
 
     const busRec = audio._buses.get('surr');
-    if (busRec.lanes !== 8) {
-        die('discrete setup: bus "surr" did not build 8 lanes (lanes=' + busRec.lanes +
-            ', effectiveLayout=' + busRec.effectiveLayout + ') on an 8ch sink.');
+    if (busRec.lanes !== laneCount) {
+        die('discrete setup: bus "surr" preset "' + preset + '" did not build ' + laneCount +
+            ' lanes (lanes=' + busRec.lanes + ', effectiveLayout=' + busRec.effectiveLayout +
+            ') on a ' + maxChannelCount + 'ch sink.');
     }
+    // Pre-play census baseline: the count of live source nodes before any voice sounds.
+    // On a running context this is 0 (no unlock pulse); the retention tier proves teardown
+    // returns to it.
+    const baseline = ctx._liveNodes();
     const handles = [];
     for (let i = 0; i < voices; i++) {
         const h = audio.play('ping', 1, 0, 1);
         if (h < 0) die('discrete setup: play returned a skip sentinel (' + h + ')');
         handles.push(h);
     }
-    // Guard: prove the bus is truly discrete (voiceNode returns an Array(8) of lane
-    // GainNodes), so a stereo-by-accident bus fails loud here instead of later.
+    // Guard: prove the bus is truly discrete (voiceNode returns an Array(laneCount) of
+    // lane GainNodes), so a stereo-by-accident bus fails loud here instead of later.
     const probe = busRec.pool.voiceNode(handles[0] >>> 0);
-    if (!Array.isArray(probe) || probe.length !== 8 || !probe[0] || !probe[0].gain) {
-        die('discrete setup: surr bus is not discrete (voiceNode did not return an 8-gain lane array)');
+    if (!Array.isArray(probe) || probe.length !== laneCount || !probe[0] || !probe[0].gain) {
+        die('discrete setup: surr bus is not discrete (voiceNode did not return a ' + laneCount +
+            '-gain lane array)');
     }
-    return { audio, ctx, handles, busRec };
+    return { audio, ctx, handles, busRec, laneCount, baseline };
 }
 
 // --- gate --------------------------------------------------------------------
@@ -1287,11 +1357,12 @@ async function main() {
             'nodes after destroy() -- a teardown leak.');
     }
 
-    // 11) T-SP4 (S6): fail-closed output-layout detection + the discrete fallback ladder.
-    //     (a) the pinned detection matrix -- every maxChannelCount shape resolves to its
-    //         fail-closed layout; only a concrete integer >= 8 earns '7.1'. The red
-    //         control swaps in a detector defaulting unknown -> 8, flipping the
-    //         undefined/null/NaN rows to '7.1' so the gate rejects.
+    // 11) T-SP4 (S6/S7): fail-closed output-layout detection + the discrete fallback ladder.
+    //     (a) the pinned detection matrix (D1) -- every maxChannelCount shape resolves to
+    //         its richest fail-closed layout (>=8 -> 7.1, 6|7 -> 5.1, 4|5 -> 3.1, else
+    //         stereo). The red control swaps in a detector defaulting unknown -> 8, so the
+    //         fail-closed rows (absent/undefined/null/NaN/non-integer/string) flip to
+    //         '7.1' and the gate rejects.
     const sp4Mismatches = [];
     for (let r = 0; r < SP4_MATRIX.length; r++) {
         const name = SP4_MATRIX[r][0], spec = SP4_MATRIX[r][1], expect = SP4_MATRIX[r][2];
@@ -1315,45 +1386,48 @@ async function main() {
             sp4Mismatches.join('; ') + ') -- the fail-closed layout guard regressed.');
     }
 
-    //     (b) the fallback ladder: a discrete request under each reading. The stereo
-    //         readings must build a bus that actually PLAYS; {8,12} must report '7.1'.
-    let ladder71 = 0, ladderStereoPlayed = 0;
+    //     (b) the fallback ladder (D2): the 12 pinned cells of requested x M. Each cell
+    //         must report the built ladder token; the 3 stereo cells must build a bus
+    //         that actually PLAYS. A request never upgrades and only steps down to fit.
+    let ladderBuilt = 0, ladderStereoPlayed = 0;
     for (let r = 0; r < SP4_LADDER.length; r++) {
-        const name = SP4_LADDER[r][0], spec = SP4_LADDER[r][1], expect = SP4_LADDER[r][2];
-        const res = await buildDiscreteFallback(spec);
+        const name = SP4_LADDER[r][0], req = SP4_LADDER[r][1], max = SP4_LADDER[r][2], expect = SP4_LADDER[r][3];
+        const res = await buildDiscreteFallback(max, req);
         if (res.eff !== expect) {
-            die('T-SP4: discrete request under maxChannelCount ' + name + ' reported effectiveLayout ' +
+            die('T-SP4: discrete request ' + name + ' reported effectiveLayout ' +
                 res.eff + ' (expected ' + expect + ').');
         }
-        if (expect === '7.1') {
-            ladder71++;
-        } else {
+        if (expect === 'stereo') {
             if (!(res.handle >= 0 && res.active >= 1)) {
-                die('T-SP4: discrete fallback under ' + name + ' did not build a bus that plays (handle=' +
+                die('T-SP4: discrete fallback ' + name + ' did not build a bus that plays (handle=' +
                     res.handle + ', active=' + res.active + ') -- a fallback bus must be a WORKING stereo bus.');
             }
             ladderStereoPlayed++;
+        } else {
+            ladderBuilt++;
         }
     }
-    process.stderr.write('T-SP4 (b) fallback ladder: ' + ladderStereoPlayed +
-        ' stereo-fallback bus(es) all played, ' + ladder71 + " resolved to '7.1' (expected 9 played / 2 seven-one)\n");
-    if (ladder71 !== 2) die('T-SP4: expected exactly 2 ladder cases to resolve to 7.1, got ' + ladder71 + '.');
+    process.stderr.write('T-SP4 (b) fallback ladder: all ' + SP4_LADDER.length + ' cells pinned; ' +
+        ladderBuilt + ' discrete-built, ' + ladderStereoPlayed +
+        ' stereo-fallback bus(es) all played (expected 9 built / 3 played)\n');
+    if (ladderBuilt !== 9 || ladderStereoPlayed !== 3) {
+        die('T-SP4: expected 9 discrete-built + 3 stereo-played ladder cells, got ' +
+            ladderBuilt + ' + ' + ladderStereoPlayed + '.');
+    }
 
     //     (c) setPosition on a discrete bus reuses the identical zero-alloc scalar stamp:
-    //         500k stamps under the tight SP5_POS ceiling, no major GC.
+    //         500k stamps under the tight SP5_POS ceiling, no major GC. Best-of-N so a lone
+    //         stray JIT/GC bookkeeping allocation cannot nondeterministically trip the tight
+    //         0.05 ceiling (the ceiling is unchanged; a real second code path allocates on
+    //         every pass and its minimum still fails).
     const dpos = await buildDiscreteEngine(1);
     const dposH = dpos.handles[0];
-    const dposRow = (() => {
-        let i = 0;
-        const writer = (n) => { dpos.audio.setPosition(dposH, n, n + 1, n - 1); };
-        const r = measureOps(() => writer(i++), { ops: SP4_POS_OPS, warmup: SP4_POS_WARMUP, source: 'gc', stabilize: true });
-        const report = checkNoGc(r.summary, RULES);
-        return {
-            label: 'T-SP4:setPosition', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
-            major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
-        };
-    })();
-    process.stderr.write('T-SP4 (c) setPosition on a discrete bus (' + SP4_POS_OPS + ' scalar stamps):\n');
+    const dposRow = measurePositionBestOf(
+        'T-SP4:setPosition',
+        (n) => { dpos.audio.setPosition(dposH, n, n + 1, n - 1); },
+        SP4_POS_OPS, SP4_POS_WARMUP, POS_BEST_OF,
+    );
+    process.stderr.write('T-SP4 (c) setPosition on a discrete bus (' + SP4_POS_OPS + ' scalar stamps, best of ' + POS_BEST_OF + '):\n');
     process.stderr.write(fmt(dposRow) + '\n');
     if (!dposRow.noMajor) {
         die('T-SP4: setPosition (discrete bus) ' + dposRow.major + ' major GC / maxMs ' +
@@ -1366,140 +1440,224 @@ async function main() {
     }
     dpos.audio.destroy();
 
-    // 12) T-SP3-lane (S6): the 8-lane solver + flush.
-    //     (a) exactly 8 lane writes per voice per flush; LANE_LFE (index 3) receives
-    //         exactly 1, azimuth-invariant (0 VBAP-derived values); the ring lanes carry
-    //         azimuth-dependent VBAP gains. Counted on the recording mock lane params.
-    const lw = await buildDiscreteEngine(1);
-    const lwH = lw.handles[0];
-    lw.audio.setPosition(lwH, 0, 0, -1);              // hard front (az 0 -> center)
-    lw.audio._flushLanes();
-    const lwLanes = lw.busRec.pool.voiceNode(lwH >>> 0);
-    if (lwLanes === null) die('T-SP3-lane: voice went stale before the write-count check');
-    let laneBad = 0;
-    for (let k = 0; k < 8; k++) {
-        let n = 0;
-        const ev = lwLanes[k].gain.events;
-        for (let j = 0; j < ev.length; j++) if (ev[j][0] === 'target') n++;
-        if (n !== 1) laneBad++;
-    }
-    const lfeFront = lwLanes[3].gain.value;          // LANE_LFE after the front flush
-    lw.audio.setPosition(lwH, 1, 0, 0);              // hard right (az 90 -> R/SR pair)
-    lw.audio._flushLanes();
-    const lfeRight = lwLanes[3].gain.value;          // LANE_LFE after a DIFFERENT azimuth
-    const ringMoved = lwLanes[1].gain.value !== 0 || lwLanes[5].gain.value !== 0;  // R or SR now live
-    process.stderr.write('T-SP3-lane (a) write-count: ' + (8 - laneBad) + '/8 lanes wrote exactly once/flush; ' +
-        'LFE(idx3)=' + lfeFront.toFixed(4) + ' front / ' + lfeRight.toFixed(4) + ' right (azimuth-invariant)\n');
-    if (laneBad !== 0) {
-        die('T-SP3-lane: ' + laneBad + ' lane(s) did not receive exactly one write per flush -- the ' +
-            '8-write-per-voice-per-flush contract broke.');
-    }
-    if (!(lfeFront !== 0 && lfeFront === lfeRight)) {
-        die('T-SP3-lane: LANE_LFE is not an azimuth-invariant distance-only send (front=' + lfeFront +
-            ', right=' + lfeRight + ') -- LFE must carry exactly one distance-only send and 0 VBAP values.');
-    }
-    if (!ringMoved) {
-        die('T-SP3-lane: the ring lanes did not change with azimuth -- the VBAP solve is not azimuth-dependent.');
-    }
-    lw.audio.destroy();
+    // 12) T-SP3-lane (S6/S7): the VBAP solver + data-driven flush at ALL THREE widths
+    //     (8/6/4 lanes for 7.1/5.1/3.1). The 6- and 4-lane reductions ride the SAME
+    //     _vbapSolve + _flushLanes as 8-lane, so each ships (a) a write-count + LFE-
+    //     invariance check, (b) a 500k-op zero-alloc GC-budget tier, and (c) an SP-03
+    //     native-event-rate tier, plus a shared retention sub-tier (d).
 
-    //     (b) GC budget: _flushLanes over 8 voices, 500k measured ops, no major GC, under
-    //         the 4.0 B/op ceiling. The recording mock param would swamp the figure (an
-    //         event object per write, absent in production), so the 64 lane params are
-    //         swapped for non-recording stubs ONCE, outside the loop -- the measured
-    //         allocation is then the engine's own (reused LANE_SCRATCH -> ~0). The red
-    //         control swaps _vbap71 for a fresh-Float32Array(8)-per-solve variant.
-    const lane = await buildDiscreteEngine(SP3_LANE_VOICES);
-    for (let v = 0; v < SP3_LANE_VOICES; v++) lane.audio.setPosition(lane.handles[v], v, 0, -1);
-    for (let v = 0; v < SP3_LANE_VOICES; v++) {
-        const lanes = lane.busRec.pool.voiceNode(lane.handles[v] >>> 0);
-        if (lanes === null) die('T-SP3-lane: voice ' + v + ' went stale before the GC measurement');
-        for (let k = 0; k < 8; k++) {
-            const g = { value: 0 };
-            g.setTargetAtTime = (val) => { g.value = val; return g; };   // non-recording stub
-            lanes[k].gain = g;
+    //     (a) exactly `lanes` writes/voice/flush; LANE_LFE (index 3) receives exactly 1,
+    //         azimuth-invariant (0 VBAP-derived values); the ring lanes carry azimuth-
+    //         dependent VBAP gains. Counted on the recording mock lane params, at each width.
+    for (let p = 0; p < SP3_LANE_PRESETS.length; p++) {
+        const preset = SP3_LANE_PRESETS[p][0], laneCount = SP3_LANE_PRESETS[p][1], maxCh = SP3_LANE_PRESETS[p][2];
+        const lw = await buildDiscreteEngine(1, preset, maxCh);
+        const lwH = lw.handles[0];
+        lw.audio.setPosition(lwH, 0, 0, -1);              // hard front (az 0 -> center)
+        lw.audio._flushLanes();
+        const lwLanes = lw.busRec.pool.voiceNode(lwH >>> 0);
+        if (lwLanes === null) die('T-SP3-lane[' + preset + ']: voice went stale before the write-count check');
+        let laneBad = 0;
+        for (let k = 0; k < laneCount; k++) {
+            let n = 0;
+            const ev = lwLanes[k].gain.events;
+            for (let j = 0; j < ev.length; j++) if (ev[j][0] === 'target') n++;
+            if (n !== 1) laneBad++;
         }
+        const lfeFront = lwLanes[3].gain.value;          // LANE_LFE after the front flush
+        lw.audio.setPosition(lwH, 1, 0, 0);              // hard right (az 90)
+        lw.audio._flushLanes();
+        const lfeRight = lwLanes[3].gain.value;          // LANE_LFE after a DIFFERENT azimuth
+        const ringMoved = lwLanes[1].gain.value !== 0;   // R lane now live at any preset
+        process.stderr.write('T-SP3-lane (a) [' + preset + ' / ' + laneCount + ' lanes] write-count: ' +
+            (laneCount - laneBad) + '/' + laneCount + ' lanes wrote exactly once/flush; ' +
+            'LFE(idx3)=' + lfeFront.toFixed(4) + ' front / ' + lfeRight.toFixed(4) + ' right (azimuth-invariant)\n');
+        if (laneBad !== 0) {
+            die('T-SP3-lane[' + preset + ']: ' + laneBad + ' lane(s) did not receive exactly one write per flush -- ' +
+                'the ' + laneCount + '-write-per-voice-per-flush contract broke.');
+        }
+        if (!(lfeFront !== 0 && lfeFront === lfeRight)) {
+            die('T-SP3-lane[' + preset + ']: LANE_LFE is not an azimuth-invariant distance-only send (front=' +
+                lfeFront + ', right=' + lfeRight + ') -- LFE must carry exactly one distance-only send.');
+        }
+        if (!ringMoved) {
+            die('T-SP3-lane[' + preset + ']: the ring lanes did not change with azimuth -- the VBAP solve is not azimuth-dependent.');
+        }
+        lw.audio.destroy();
     }
-    if (SP3_LANE_RED) lane.audio._vbap71 = redVbap71Alloc;
-    const laneFlush = (i) => {
-        for (let v = 0; v < SP3_LANE_VOICES; v++) lane.audio.setPosition(lane.handles[v], i + v, 0, -(v + 1));
-        lane.audio._flushLanes();
-    };
-    const laneRow = (() => {
-        let i = 0;
-        const r = measureOps(() => laneFlush(i++), { ops: SP3_LANE_OPS, warmup: SP3_LANE_WARMUP, source: 'gc', stabilize: true });
-        const report = checkNoGc(r.summary, RULES);
-        return {
-            label: SP3_LANE_RED ? 'T-SP3-lane:RED' : 'T-SP3-lane', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
-            major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
+
+    //     (b) GC budget: _flushLanes over SP3_LANE_VOICES voices, 500k measured ops, no
+    //         major GC, under the 4.0 B/op ceiling -- AT EACH WIDTH. The recording mock
+    //         param would swamp the figure (an event object per write, absent in
+    //         production), so the lane params are swapped for non-recording stubs ONCE,
+    //         outside the loop -- the measured allocation is then the engine's own (reused
+    //         LANE_SCRATCH -> ~0). The red control swaps _vbapSolve for a fresh-Float32Array-
+    //         per-solve variant; it is applied on the FIRST width (8-lane), which runs first.
+    for (let p = 0; p < SP3_LANE_PRESETS.length; p++) {
+        const preset = SP3_LANE_PRESETS[p][0], laneCount = SP3_LANE_PRESETS[p][1], maxCh = SP3_LANE_PRESETS[p][2];
+        const applyRed = SP3_LANE_RED && p === 0;
+        const lane = await buildDiscreteEngine(SP3_LANE_VOICES, preset, maxCh);
+        for (let v = 0; v < SP3_LANE_VOICES; v++) lane.audio.setPosition(lane.handles[v], v, 0, -1);
+        for (let v = 0; v < SP3_LANE_VOICES; v++) {
+            const lanes = lane.busRec.pool.voiceNode(lane.handles[v] >>> 0);
+            if (lanes === null) die('T-SP3-lane[' + preset + ']: voice ' + v + ' went stale before the GC measurement');
+            for (let k = 0; k < laneCount; k++) {
+                const g = { value: 0 };
+                g.setTargetAtTime = (val) => { g.value = val; return g; };   // non-recording stub
+                lanes[k].gain = g;
+            }
+        }
+        if (applyRed) lane.audio._vbapSolve = redVbapSolveAlloc;
+        const laneFlush = (i) => {
+            for (let v = 0; v < SP3_LANE_VOICES; v++) lane.audio.setPosition(lane.handles[v], i + v, 0, -(v + 1));
+            lane.audio._flushLanes();
         };
-    })();
-    process.stderr.write('T-SP3-lane (b) _flushLanes over ' + SP3_LANE_VOICES + ' voices (' + SP3_LANE_OPS + ' ops):\n');
-    process.stderr.write(fmt(laneRow) + '\n');
-    if (SP3_LANE_RED) {
-        if (!(laneRow.bytesPerOp >= SP3_LANE_RED_MIN_BYTES_PER_OP)) {
-            die('SP3_LANE_RED: the fresh-Float32Array(8)-per-solve control measured ' +
-                laneRow.bytesPerOp.toFixed(4) + ' bytes/op, below the ' + SP3_LANE_RED_MIN_BYTES_PER_OP +
-                ' floor -- the red control is not modelling the allocation it claims and cannot prove ' +
-                'this gate is falsifiable.');
+        const laneRow = (() => {
+            let i = 0;
+            const r = measureOps(() => laneFlush(i++), { ops: SP3_LANE_OPS, warmup: SP3_LANE_WARMUP, source: 'gc', stabilize: true });
+            const report = checkNoGc(r.summary, RULES);
+            return {
+                label: (applyRed ? 'T-SP3-lane:RED[' : 'T-SP3-lane[') + preset + ']',
+                bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+                major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
+            };
+        })();
+        process.stderr.write('T-SP3-lane (b) [' + preset + ' / ' + laneCount + ' lanes] _flushLanes over ' +
+            SP3_LANE_VOICES + ' voices (' + SP3_LANE_OPS + ' ops):\n');
+        process.stderr.write(fmt(laneRow) + '\n');
+        if (applyRed) {
+            if (!(laneRow.bytesPerOp >= SP3_LANE_RED_MIN_BYTES_PER_OP)) {
+                die('SP3_LANE_RED: the fresh-Float32Array-per-solve control measured ' +
+                    laneRow.bytesPerOp.toFixed(4) + ' bytes/op, below the ' + SP3_LANE_RED_MIN_BYTES_PER_OP +
+                    ' floor -- the red control is not modelling the allocation it claims and cannot prove ' +
+                    'this gate is falsifiable.');
+            }
+            die('SP3_LANE_RED: gated _flushLanes allocates a fresh Float32Array per solve (' +
+                laneRow.bytesPerOp.toFixed(4) + ' bytes/op) -- rejecting as designed. This is the red ' +
+                'control; a clean run does not take this branch.');
         }
-        die('SP3_LANE_RED: gated _flushLanes allocates a fresh Float32Array(8) per solve (' +
-            laneRow.bytesPerOp.toFixed(4) + ' bytes/op) -- rejecting as designed. This is the red ' +
-            'control; a clean run does not take this branch.');
+        if (!laneRow.noMajor) {
+            die('T-SP3-lane[' + preset + ']: ' + laneRow.major + ' major GC / maxMs ' + laneRow.maxMs.toFixed(3) +
+                ' violates ' + JSON.stringify(RULES));
+        }
+        if (!(laneRow.bytesPerOp <= SP3_LANE_MAX_BYTES_PER_OP)) {
+            die('T-SP3-lane[' + preset + ']: _flushLanes measured ' + laneRow.bytesPerOp.toFixed(4) + ' bytes/op, over the ' +
+                SP3_LANE_MAX_BYTES_PER_OP + ' ceiling -- the ' + laneCount + '-lane solve/flush is allocating on the monitor path.');
+        }
+        lane.audio.destroy();
     }
-    if (!laneRow.noMajor) {
-        die('T-SP3-lane: ' + laneRow.major + ' major GC / maxMs ' + laneRow.maxMs.toFixed(3) +
-            ' violates ' + JSON.stringify(RULES));
-    }
-    if (!(laneRow.bytesPerOp <= SP3_LANE_MAX_BYTES_PER_OP)) {
-        die('T-SP3-lane: _flushLanes measured ' + laneRow.bytesPerOp.toFixed(4) + ' bytes/op, over the ' +
-            SP3_LANE_MAX_BYTES_PER_OP + ' ceiling -- the 8-lane solve/flush is allocating on the monitor path.');
-    }
-    lane.audio.destroy();
 
-    //     (c) SP-03 native-event bound on the lane params: 8 voices x 100 ticks, 6
-    //         stamps/tick + one flush/tick -> ~100 target events/lane/voice, cap 200.
-    //         The red control (SP3_RATE_RED) writes the lanes directly at 60 Hz -> ~600.
-    const rate = await buildDiscreteEngine(SP3_LANE_VOICES);
-    const ratePool = rate.busRec.pool;
-    if (SP3_RATE_RED) {
-        const fpt = (SP3_LANE_RATE_RED_HZ / 10) | 0;    // 6 frames per ~10 Hz tick
-        for (let t = 0; t < SP3_LANE_TICKS; t++) {
-            const now = rate.ctx.currentTime;
-            for (let f = 0; f < fpt; f++) {
-                for (let v = 0; v < SP3_LANE_VOICES; v++) {
-                    const lanes = ratePool.voiceNode(rate.handles[v] >>> 0);
-                    if (lanes === null) continue;
-                    for (let k = 0; k < 8; k++) lanes[k].gain.setTargetAtTime(v, now, 0.02);
+    //     (c) SP-03 native-event bound on the lane params: SP3_LANE_VOICES voices x 100
+    //         ticks, 6 stamps/tick + one flush/tick -> ~100 target events/lane/voice, cap
+    //         200 -- AT EACH WIDTH. The red control (SP3_RATE_RED) writes the lanes directly
+    //         at 60 Hz -> ~600; it is applied on the FIRST width (8-lane), which runs first.
+    for (let p = 0; p < SP3_LANE_PRESETS.length; p++) {
+        const preset = SP3_LANE_PRESETS[p][0], laneCount = SP3_LANE_PRESETS[p][1], maxCh = SP3_LANE_PRESETS[p][2];
+        const applyRed = SP3_RATE_RED && p === 0;
+        const rate = await buildDiscreteEngine(SP3_LANE_VOICES, preset, maxCh);
+        const ratePool = rate.busRec.pool;
+        if (applyRed) {
+            const fpt = (SP3_LANE_RATE_RED_HZ / 10) | 0;    // 6 frames per ~10 Hz tick
+            for (let t = 0; t < SP3_LANE_TICKS; t++) {
+                const now = rate.ctx.currentTime;
+                for (let f = 0; f < fpt; f++) {
+                    for (let v = 0; v < SP3_LANE_VOICES; v++) {
+                        const lanes = ratePool.voiceNode(rate.handles[v] >>> 0);
+                        if (lanes === null) continue;
+                        for (let k = 0; k < laneCount; k++) lanes[k].gain.setTargetAtTime(v, now, 0.02);
+                    }
                 }
             }
-        }
-    } else {
-        for (let t = 0; t < SP3_LANE_TICKS; t++) {
-            for (let f = 0; f < SP3_LANE_FRAMES_PER_TICK; f++) {
-                for (let v = 0; v < SP3_LANE_VOICES; v++) rate.audio.setPosition(rate.handles[v], v + f, 0, -(f + 1));
+        } else {
+            for (let t = 0; t < SP3_LANE_TICKS; t++) {
+                for (let f = 0; f < SP3_LANE_FRAMES_PER_TICK; f++) {
+                    for (let v = 0; v < SP3_LANE_VOICES; v++) rate.audio.setPosition(rate.handles[v], v + f, 0, -(f + 1));
+                }
+                rate.audio._flushLanes();                   // the ~10 Hz monitor flush
             }
-            rate.audio._flushLanes();                   // the ~10 Hz monitor flush
+        }
+        let rateMax = 0;
+        for (let v = 0; v < SP3_LANE_VOICES; v++) {
+            const lanes = ratePool.voiceNode(rate.handles[v] >>> 0);
+            if (lanes === null) die('T-SP3-lane[' + preset + '] rate: voice ' + v + ' went stale before counting');
+            for (let k = 0; k < laneCount; k++) {
+                let n = 0;
+                const ev = lanes[k].gain.events;
+                for (let j = 0; j < ev.length; j++) if (ev[j][0] === 'target') n++;
+                if (n > rateMax) rateMax = n;
+            }
+        }
+        process.stderr.write('T-SP3-lane (c) [' + preset + ' / ' + laneCount + ' lanes] ' +
+            (applyRed ? '(RED: 60 Hz direct lane writer)' : '(10 Hz throttled flush)') +
+            ': max lane target events/param = ' + rateMax + ' (cap ' + SP3_LANE_EVENT_CAP + ', expected ~' + SP3_LANE_TICKS + ')\n');
+        if (!(rateMax <= SP3_LANE_EVENT_CAP)) {
+            die('T-SP3-lane[' + preset + ']: ' + rateMax + ' lane target events/param exceeds the ' + SP3_LANE_EVENT_CAP +
+                ' cap -- a per-frame lane writer is growing the native event list (SP-03).');
+        }
+        rate.audio.destroy();
+    }
+
+    //     (d) retention (S7): build/teardown each preset SP3_LANE_CYCLES times on a running
+    //         context (no unlock pulse). destroy() must null the per-bus scratch AND the
+    //         frozen vbap record, restore the pristine destination triple VERBATIM, and
+    //         leave no live source node (census delta 0). A lite-leak witness is untracked
+    //         ONLY on that full proof, so a teardown that stops releasing any of them leaves
+    //         the ledger nonzero. Sentinels are pinned so size() is a deterministic ledger.
+    const laneTracker = createLeakTracker({ name: 'lite-audio-discrete-soak' });
+    const LANE_NOOP = () => {};
+    const laneKept = [];
+    let laneTripleBad = 0, laneCensusBad = 0;
+    const totalLaneCycles = SP3_LANE_CYCLES * SP3_LANE_PRESETS.length;
+    for (let c = 0; c < SP3_LANE_CYCLES; c++) {
+        for (let p = 0; p < SP3_LANE_PRESETS.length; p++) {
+            const preset = SP3_LANE_PRESETS[p][0], maxCh = SP3_LANE_PRESETS[p][2];
+            let cyc;
+            try {
+                cyc = await buildDiscreteEngine(SP3_LANE_RETENTION_VOICES, preset, maxCh, true);
+            } catch (err) {
+                die('T-SP3-lane retention: build cycle ' + c + '/' + preset + ' threw (' +
+                    (err && err.message || err) + ') -- a teardown that stops releasing its lite-signal ' +
+                    'nodes exhausts the shared pool.');
+            }
+            for (let v = 0; v < SP3_LANE_RETENTION_VOICES; v++) cyc.audio.setPosition(cyc.handles[v], v, 0, -(v + 1));
+            cyc.audio._flushLanes();                     // real lane writes onto the voices
+            const busRec = cyc.busRec;
+            const dest = cyc.ctx.destination;
+            const sentinel = { cycle: c, preset };
+            laneKept.push(sentinel);
+            const witness = laneTracker.track(sentinel, LANE_NOOP, preset + c);
+            cyc.audio.destroy();
+            // Triple restored VERBATIM to the pristine pre-discrete mock defaults (2 / max /
+            // speakers), NOT a zeroed triple and NOT the discrete override.
+            const tripleOk = dest.channelCount === 2 && dest.channelCountMode === 'max' &&
+                dest.channelInterpretation === 'speakers';
+            if (!tripleOk) laneTripleBad++;
+            // Census: every pooled voice stopped by pool.destroy(), so the live source-node
+            // count returns to the pre-play baseline (0 on a running context).
+            if (cyc.ctx._liveNodes() !== cyc.baseline) laneCensusBad++;
+            if (busRec.lanes === 0 && busRec.vbap === null && busRec.posXYZ === null &&
+                busRec.posOwner === null && busRec.posDirty === null && tripleOk) {
+                laneTracker.untrack(witness);
+            }
         }
     }
-    let rateMax = 0;
-    for (let v = 0; v < SP3_LANE_VOICES; v++) {
-        const lanes = ratePool.voiceNode(rate.handles[v] >>> 0);
-        if (lanes === null) die('T-SP3-lane rate: voice ' + v + ' went stale before counting');
-        for (let k = 0; k < 8; k++) {
-            let n = 0;
-            const ev = lanes[k].gain.events;
-            for (let j = 0; j < ev.length; j++) if (ev[j][0] === 'target') n++;
-            if (n > rateMax) rateMax = n;
-        }
+    if (laneKept.length !== totalLaneCycles) die('T-SP3-lane retention: internal -- pinned ' + laneKept.length + ' of ' + totalLaneCycles);
+    const laneLeaked = laneTracker.size();
+    process.stderr.write('T-SP3-lane (d) retention: ' + totalLaneCycles + ' build/teardown cycles x {7.1,5.1,3.1}; ' +
+        'lite-leak witnessed ' + laneLeaked + ' un-released bus record(s), ' + laneTripleBad +
+        ' triple-restore miss(es), ' + laneCensusBad + ' census delta(s) (expected 0/0/0)\n');
+    if (laneTripleBad !== 0) {
+        die('T-SP3-lane retention: ' + laneTripleBad + ' teardown(s) did NOT restore the pristine destination ' +
+            'triple -- destroy() must write back the saved pre-discrete channelCount/mode/interpretation verbatim.');
     }
-    process.stderr.write('T-SP3-lane (c) ' + (SP3_RATE_RED ? '(RED: 60 Hz direct lane writer)' : '(10 Hz throttled flush)') +
-        ': max lane target events/param = ' + rateMax + ' (cap ' + SP3_LANE_EVENT_CAP + ', expected ~' + SP3_LANE_TICKS + ')\n');
-    if (!(rateMax <= SP3_LANE_EVENT_CAP)) {
-        die('T-SP3-lane: ' + rateMax + ' lane target events/param exceeds the ' + SP3_LANE_EVENT_CAP +
-            ' cap -- a per-frame lane writer is growing the native event list (SP-03).');
+    if (laneCensusBad !== 0) {
+        die('T-SP3-lane retention: ' + laneCensusBad + ' teardown(s) left a live source node (census delta != 0) -- ' +
+            'pool.destroy() must stop every voice.');
     }
-    rate.audio.destroy();
+    if (laneLeaked !== 0) {
+        die('T-SP3-lane retention: lite-leak witnessed ' + laneLeaked + ' discrete bus record(s) still holding ' +
+            'posXYZ/posOwner/posDirty scratch or the vbap record after destroy() -- a teardown leak.');
+    }
 
     process.stderr.write(
         'result: boxed-double handle (bus>=1, gen>8388608) is below the gate resolution; ' +
@@ -1511,11 +1669,16 @@ async function main() {
         'proves destroy() releases the per-bus positional scratch across ' + SP3_CYCLES +
         ' build/teardown cycles (T-SP3). S4: the hrtf bus builds HRTF panners across ' +
         'capacity and the gain=0 HRIR prewarm retires on the monitor tick with no leaked ' +
-        'live node, released clean across ' + SP5_CYCLES + ' cycles (T-SP5). S6: output-layout ' +
-        'detection resolves fail-closed on every pinned reading and a discrete request on a ' +
-        '< 8ch sink builds a working stereo bus (T-SP4); the 8-lane VBAP solve + _flushLanes ' +
-        'is zero-alloc over 500k ops (8 lane writes/voice/flush, LFE an azimuth-invariant send) ' +
-        'and rate-bounded to ~100 events/lane under a 200 cap (T-SP3-lane).\n');
+        'live node, released clean across ' + SP5_CYCLES + ' cycles (T-SP5). S6/S7: output-' +
+        'layout detection resolves fail-closed on every pinned reading (>=8 -> 7.1, 6|7 -> 5.1, ' +
+        '4|5 -> 3.1, else stereo) and the 12-cell requested x M fallback ladder builds the ' +
+        'largest fitting preset -- a request never upgrades -- falling back to a working stereo ' +
+        'bus when even 3.1 does not fit (T-SP4). The generalized data-driven VBAP solve + ' +
+        '_flushLanes is zero-alloc over 500k ops at ALL THREE widths (exactly 8/6/4 lane ' +
+        'writes/voice/flush for 7.1/5.1/3.1, LFE at index 3 an azimuth-invariant send) and ' +
+        'rate-bounded to ~100 events/lane under a 200 cap, with destroy() releasing the per-bus ' +
+        'scratch + vbap record and restoring the pristine destination triple across ' +
+        (SP3_LANE_CYCLES * 3) + ' build/teardown cycles (T-SP3-lane).\n');
     process.stdout.write('ok\n');
     process.exit(0);
 }

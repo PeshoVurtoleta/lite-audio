@@ -1,5 +1,5 @@
 /**
- * @zakkster/lite-audio - S6 output-layout detection contract tests (node:test).
+ * @zakkster/lite-audio - S6/S7 output-layout detection contract tests (node:test).
  *
  * The torture gate (test/torture.mjs, T-SP4) proves the ALLOCATION-FREE and
  * RATE-BOUNDED properties of the discrete family (setPosition on a discrete bus
@@ -10,12 +10,13 @@
  * This file pins the FAIL-CLOSED CONTRACT a heap/rate gate cannot see: given a
  * sink's maxChannelCount reading, does _detectLayout() resolve to exactly the
  * pinned layout for every boundary shape (absent, present-but-undefined, null,
- * NaN, non-integer, a string digit, an integer under/at/over the threshold, a
- * missing destination)? Does a discrete createBus() request under an
- * undersized/unknown sink transparently build a bus that actually plays, without
- * ever mutating the destination? Is detection cold-once (no re-detect on a second
- * init(), a cached readout survives destroy())? Every case here is a correctness
- * question, not a budget.
+ * NaN, non-integer, a string digit, an integer under/at/over EVERY threshold --
+ * 4, 6, 8 -- a missing destination)? Does a discrete createBus() request under
+ * an undersized/unknown sink transparently step down the S7 fallback ladder
+ * (D2) to the largest preset that fits, or all the way to a working stereo bus,
+ * without ever mutating the destination on the stereo-fallback path? Is
+ * detection cold-once (no re-detect on a second init(), a cached readout
+ * survives destroy())? Every case here is a correctness question, not a budget.
  */
 
 import { describe, it } from 'node:test';
@@ -56,11 +57,12 @@ async function layoutFor(configureCtx) {
 }
 
 /**
- * Build a LiteAudio with ONE discrete '7.1' bus + a routed sound against a
- * context configured by `configureCtx`, unlocked (ctx starts 'running' so
- * init() marks it unlocked immediately - no gesture needed), fully settled.
+ * Build a LiteAudio with ONE discrete bus (default preset '7.1', overridable for
+ * the D2 12-cell matrix) + a routed sound against a context configured by
+ * `configureCtx`, unlocked (ctx starts 'running' so init() marks it unlocked
+ * immediately - no gesture needed), fully settled.
  */
-async function buildLadder(configureCtx) {
+async function buildLadder(configureCtx, preset = '7.1') {
     const ctx = createMockContext({ state: 'running' });
     if (configureCtx) configureCtx(ctx);
     const audio = new LiteAudio({
@@ -68,7 +70,7 @@ async function buildLadder(configureCtx) {
         fetch: mockFetch({ '/s.wav': 500 }), setTimeout: () => 0, clearTimeout: () => {},
     });
     await audio.init(ctx);
-    audio.createBus('s', { spatial: 'discrete', preset: '7.1' });
+    audio.createBus('s', { spatial: 'discrete', preset });
     await audio.defineSounds({ ping: { src: ['/s.wav'], bus: 's' } });
     await flushMicrotasks(8);
     return { audio, ctx };
@@ -103,14 +105,29 @@ describe('output-layout detection matrix (pinned, exact)', () => {
         assert.equal(audio.layoutOf(), 'stereo');
     });
 
-    it('4 -> stereo (no 3.1 until S7)', async () => {
-        const { audio } = await layoutFor((ctx) => ctx._setMaxChannelCount(4));
+    it('3 (N-1, just under the 3.1 threshold) -> stereo', async () => {
+        const { audio } = await layoutFor((ctx) => ctx._setMaxChannelCount(3));
         assert.equal(audio.layoutOf(), 'stereo');
     });
 
-    it('6 -> stereo (no 5.1 until S7)', async () => {
+    it("4 (N, the 3.1 threshold) -> '3.1' (S7: widened from stereo)", async () => {
+        const { audio } = await layoutFor((ctx) => ctx._setMaxChannelCount(4));
+        assert.equal(audio.layoutOf(), '3.1');
+    });
+
+    it("5 (N+1 of the 3.1 threshold, top of the 3.1 band) -> '3.1'", async () => {
+        const { audio } = await layoutFor((ctx) => ctx._setMaxChannelCount(5));
+        assert.equal(audio.layoutOf(), '3.1');
+    });
+
+    it("6 (N, the 5.1 threshold) -> '5.1' (S7: widened from stereo)", async () => {
         const { audio } = await layoutFor((ctx) => ctx._setMaxChannelCount(6));
-        assert.equal(audio.layoutOf(), 'stereo');
+        assert.equal(audio.layoutOf(), '5.1');
+    });
+
+    it("7 (N+1 of the 5.1 threshold, top of the 5.1 band, N-1 of the 7.1 threshold) -> '5.1'", async () => {
+        const { audio } = await layoutFor((ctx) => ctx._setMaxChannelCount(7));
+        assert.equal(audio.layoutOf(), '5.1');
     });
 
     it('7.5 -> stereo (non-integer)', async () => {
@@ -142,12 +159,12 @@ describe('output-layout detection matrix (pinned, exact)', () => {
 // ---------- 2. extra boundary coverage the pinned matrix does not name ------
 
 describe('extra boundary coverage: N-1, N, N+1, 0, -0, negatives, infinities, adversarial', () => {
-    it('7 (N-1, just under the threshold) -> stereo', async () => {
-        const { audio } = await layoutFor((ctx) => ctx._setMaxChannelCount(7));
-        assert.equal(audio.layoutOf(), 'stereo');
+    it('adversarial: 3.9999999 (a non-integer that rounds visually to 4) -> stereo, never coerced/truncated to 4', async () => {
+        const { audio } = await layoutFor((ctx) => ctx._setMaxChannelCount(3.9999999));
+        assert.equal(audio.layoutOf(), 'stereo', 'Number.isInteger must reject a near-integer float, not Math.floor it');
     });
 
-    it('9 (N+1, just over the threshold) -> "7.1"', async () => {
+    it('9 (N+1, just over the 7.1 threshold) -> "7.1"', async () => {
         const { audio } = await layoutFor((ctx) => ctx._setMaxChannelCount(9));
         assert.equal(audio.layoutOf(), '7.1');
     });
@@ -234,19 +251,33 @@ describe('detection is cold-once: cached at init(), never re-derived', () => {
     });
 });
 
-// ---------- 4. the fallback ladder (T-SP4 (b)): 9 stereo, 2 seven-one -------
+// ---------- 4. the fallback ladder (T-SP4 (b)): request "7.1" under every ---
+// ----------    reading (S7: 4/5/6/7 now step DOWN to 3.1/5.1 -- they no ----
+// ----------    longer fall all the way to stereo) ---------------------------
 
-describe('discrete request fallback ladder: request "7.1" under every sub-8 reading', () => {
+describe('discrete request fallback ladder: request "7.1" under every sink reading', () => {
+    // Below the 3.1 floor (M < 4): a '7.1' request has nowhere to land and
+    // falls all the way to a working plain-stereo bus. Destination untouched.
     const STEREO_ROWS = [
         ['absent', (ctx) => ctx._deleteMaxChannelCount()],
         ['undefined', (ctx) => ctx._setMaxChannelCount(undefined)],
         ['null', (ctx) => ctx._setMaxChannelCount(null)],
         ['NaN', (ctx) => ctx._setMaxChannelCount(NaN)],
         ['2', (ctx) => ctx._setMaxChannelCount(2)],
-        ['4', (ctx) => ctx._setMaxChannelCount(4)],
-        ['6', (ctx) => ctx._setMaxChannelCount(6)],
         ['7.5', (ctx) => ctx._setMaxChannelCount(7.5)],
         ["'8'", (ctx) => ctx._setMaxChannelCount('8')],
+    ];
+    // S7: 4 or 5 -> the request steps down to '3.1' and BUILDS (4-lane pool);
+    // the destination IS mutated to 4ch.
+    const THREE_ONE_ROWS = [
+        ['4', (ctx) => ctx._setMaxChannelCount(4)],
+        ['5', (ctx) => ctx._setMaxChannelCount(5)],
+    ];
+    // S7: 6 or 7 -> the request steps down to '5.1' and BUILDS (6-lane pool);
+    // the destination IS mutated to 6ch.
+    const FIVE_ONE_ROWS = [
+        ['6', (ctx) => ctx._setMaxChannelCount(6)],
+        ['7', (ctx) => ctx._setMaxChannelCount(7)],
     ];
     const SEVEN_ONE_ROWS = [
         ['8', (ctx) => ctx._setMaxChannelCount(8)],
@@ -257,13 +288,41 @@ describe('discrete request fallback ladder: request "7.1" under every sub-8 read
         it('maxChannelCount ' + name + ' -> effectiveLayoutOf === "stereo", and the fallback bus actually plays', async () => {
             const { audio, ctx } = await buildLadder(configure);
             assert.equal(audio.effectiveLayoutOf('s'), 'stereo');
-            // Destination NOT mutated on a stereo-fallback case (Audio.js:975 guard).
+            // Destination NOT mutated on a stereo-fallback case (Audio.js:1050 guard).
             assert.equal(ctx.destination.channelCount, 2, 'stereo fallback must never touch destination.channelCount');
             assert.equal(ctx.destination.channelCountMode, 'max');
             assert.equal(ctx.destination.channelInterpretation, 'speakers');
             const h = audio.play('ping');
             assert.ok(h >= 0, 'a real play() must return a non-negative handle');
             assert.ok(audio.activeCount('s') >= 1, 'the fallback bus must actually be sounding');
+            audio.destroy();
+        });
+    }
+
+    for (const [name, configure] of THREE_ONE_ROWS) {
+        it('maxChannelCount ' + name + ' -> a "7.1" request steps DOWN to effectiveLayoutOf === "3.1" and builds a 4-lane pool', async () => {
+            const { audio, ctx } = await buildLadder(configure);
+            assert.equal(audio.effectiveLayoutOf('s'), '3.1');
+            assert.equal(ctx.destination.channelCount, 4, 'a 4-lane discrete pool mutates the destination to 4ch');
+            assert.equal(ctx.destination.channelCountMode, 'explicit');
+            assert.equal(ctx.destination.channelInterpretation, 'discrete');
+            const h = audio.play('ping');
+            assert.ok(h >= 0);
+            assert.ok(audio.activeCount('s') >= 1);
+            audio.destroy();
+        });
+    }
+
+    for (const [name, configure] of FIVE_ONE_ROWS) {
+        it('maxChannelCount ' + name + ' -> a "7.1" request steps DOWN to effectiveLayoutOf === "5.1" and builds a 6-lane pool', async () => {
+            const { audio, ctx } = await buildLadder(configure);
+            assert.equal(audio.effectiveLayoutOf('s'), '5.1');
+            assert.equal(ctx.destination.channelCount, 6, 'a 6-lane discrete pool mutates the destination to 6ch');
+            assert.equal(ctx.destination.channelCountMode, 'explicit');
+            assert.equal(ctx.destination.channelInterpretation, 'discrete');
+            const h = audio.play('ping');
+            assert.ok(h >= 0);
+            assert.ok(audio.activeCount('s') >= 1);
             audio.destroy();
         });
     }
@@ -282,10 +341,68 @@ describe('discrete request fallback ladder: request "7.1" under every sub-8 read
         });
     }
 
-    it('exactly 9 of 11 ladder cases resolve to stereo and exactly 2 resolve to "7.1" (tally, not per-row)', () => {
-        assert.equal(STEREO_ROWS.length, 9);
+    it('exactly 7 of 13 ladder cases resolve to stereo, 2 to "3.1", 2 to "5.1", 2 to "7.1" (tally, not per-row)', () => {
+        assert.equal(STEREO_ROWS.length, 7);
+        assert.equal(THREE_ONE_ROWS.length, 2);
+        assert.equal(FIVE_ONE_ROWS.length, 2);
         assert.equal(SEVEN_ONE_ROWS.length, 2);
-        assert.equal(STEREO_ROWS.length + SEVEN_ONE_ROWS.length, 11);
+        assert.equal(STEREO_ROWS.length + THREE_ONE_ROWS.length + FIVE_ONE_ROWS.length + SEVEN_ONE_ROWS.length, 13);
+    });
+});
+
+// ---------- 4b. the FULL D2 12-cell ladder matrix (requested x M) ----------
+// Every cell of the pinned decisions/0009-preset-ladder.md D2 table: a request
+// R on a sink of M channels resolves to the LARGEST preset that fits
+// min(need(R), M), stepping DOWN 7.1 -> 5.1 -> 3.1 -> stereo, NEVER upgrading
+// (a '5.1' request on an 8ch sink stays '5.1'). Mirrors torture.mjs's
+// SP4_LADDER exactly (same 12 rows), but as a named, individually-reportable
+// node:test case per cell rather than a GC-gate tally.
+describe('D2 fallback ladder: the full 12-cell (requested x M) matrix', () => {
+    const D2_MATRIX = [
+        ['7.1@8', '7.1', 8, '7.1'],
+        ['7.1@6', '7.1', 6, '5.1'],
+        ['7.1@4', '7.1', 4, '3.1'],
+        ['7.1@2', '7.1', 2, 'stereo'],
+        ['5.1@8', '5.1', 8, '5.1'],
+        ['5.1@6', '5.1', 6, '5.1'],
+        ['5.1@4', '5.1', 4, '3.1'],
+        ['5.1@2', '5.1', 2, 'stereo'],
+        ['3.1@8', '3.1', 8, '3.1'],
+        ['3.1@6', '3.1', 6, '3.1'],
+        ['3.1@4', '3.1', 4, '3.1'],
+        ['3.1@2', '3.1', 2, 'stereo'],
+    ];
+
+    for (const [name, request, maxChannelCount, expect] of D2_MATRIX) {
+        it('request ' + name + ' -> effectiveLayoutOf === "' + expect + '" (never upgrades, only steps down)', async () => {
+            const { audio, ctx } = await buildLadder((ctx) => ctx._setMaxChannelCount(maxChannelCount), request);
+            assert.equal(audio.effectiveLayoutOf('s'), expect);
+            const h = audio.play('ping');
+            assert.ok(h >= 0, 'cell ' + name + ' must build a bus that actually plays');
+            assert.ok(audio.activeCount('s') >= 1, 'cell ' + name + ' must actually be sounding');
+            if (expect === 'stereo') {
+                assert.equal(ctx.destination.channelCount, 2, 'a stereo-fallback cell must never mutate the destination');
+            } else {
+                const need = expect === '7.1' ? 8 : expect === '5.1' ? 6 : 4;
+                assert.equal(ctx.destination.channelCount, need, 'cell ' + name + ' must mutate the destination to the BUILT layout\'s channel count');
+            }
+            audio.destroy();
+        });
+    }
+
+    it('all 12 cells pinned: 9 build a discrete pool, 3 fall back to stereo (tally, not per-row)', () => {
+        const built = D2_MATRIX.filter(([, , , e]) => e !== 'stereo').length;
+        const fell = D2_MATRIX.filter(([, , , e]) => e === 'stereo').length;
+        assert.equal(built, 9);
+        assert.equal(fell, 3);
+        assert.equal(D2_MATRIX.length, 12);
+    });
+
+    it('a request never upgrades: "5.1" on an 8ch sink stays "5.1" though the sink could carry "7.1"', async () => {
+        const { audio, ctx } = await buildLadder((ctx) => ctx._setMaxChannelCount(8), '5.1');
+        assert.equal(audio.effectiveLayoutOf('s'), '5.1', 'a 5.1 request must never be upgraded to 7.1 just because the sink can carry it');
+        assert.equal(audio.layoutOf(), '7.1', 'layoutOf() (sink capability) is a DIFFERENT question from effectiveLayoutOf() (per-bus built layout)');
+        audio.destroy();
     });
 });
 

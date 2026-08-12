@@ -118,10 +118,23 @@ export interface CreateBusOptions {
      * setPosition(). 'hrtf' is positional-family (same distance graph +
      * setPosition()) but the pool sets panningModel='HRTF' for per-voice binaural
      * convolution -- headphones-only, higher CPU; a silent HRIR prewarm fires
-     * post-unlock to eat the first-play hitch. An unknown value fails closed
-     * (RangeError).
+     * post-unlock to eat the first-play hitch. 'discrete' (S6) rides the pool's
+     * discrete-surround mode: a 7+1 bus with 8 SMPTE lanes and per-voice VBAP
+     * panning driven by setPosition() -- but ONLY when the detected output layout
+     * reports >= 8 hardware channels; on a smaller sink it transparently falls back
+     * to a working stereo bus (effectiveLayoutOf() reports which). An unknown value
+     * fails closed (RangeError).
      */
-    spatial?: 'stereo' | 'positional' | 'hrtf';
+    spatial?: 'stereo' | 'positional' | 'hrtf' | 'discrete';
+
+    /**
+     * Discrete-surround preset for a `spatial: 'discrete'` bus (S6). S6 ships one
+     * preset, '7.1' (8 lanes: L R C LFE SL SR SBL SBR). Only valid with
+     * spatial: 'discrete' -- a preset on any other bus fails closed (RangeError),
+     * and '5.1'/'3.1' reject loudly (they land in a later release) rather than
+     * silently degrade. Defaults to '7.1' when spatial is 'discrete'.
+     */
+    preset?: '7.1';
 
     /**
      * Arm a stereo Haas widener on this bus and enable setWidth() (S5). A number
@@ -327,6 +340,25 @@ export class LiteAudio {
     /** Current stereo width of a bus (last accepted setWidth target), or null on an
      *  unarmed / disarmed / unknown bus. */
     widthOf(busName: string): number | null;
+
+    // ---------- Output layout (S6) -----------------------------------------
+
+    /**
+     * The engine's DETECTED output layout, resolved once at init() and cached:
+     * '7.1' when the sink reported a concrete integer >= 8 hardware channels, else
+     * 'stereo' (the fail-closed default for every unverified sink). A mid-session
+     * device change does not re-detect. See decisions/0008.
+     */
+    layoutOf(): '7.1' | 'stereo';
+
+    /**
+     * A discrete bus's EFFECTIVE layout: '7.1' when its 8 lanes were actually built,
+     * 'stereo' when a discrete request fell back (a sink under 8 channels), or null
+     * on a non-discrete bus or an unknown name. This is how a caller learns whether
+     * the fallback happened -- a discrete request on a 2ch sink returns 'stereo'
+     * here, and that is correct, not an error.
+     */
+    effectiveLayoutOf(busName: string): '7.1' | 'stereo' | null;
 
     // ---------- Mix intelligence (v1.2.0) ----------------------------------
 

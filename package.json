@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-audio",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "Zero-GC reactive Web Audio engine. Signal-driven buses, ABA-safe voice handles, unlock queue. SFX layer over @zakkster/lite-audio-pool.",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
   "license": "MIT",
@@ -27,6 +27,7 @@
     "Audio.d.ts",
     "Compat.js",
     "Compat.d.ts",
+    "README.md",
     "PARITY.md",
     "llms.txt",
     "CHANGELOG.md"

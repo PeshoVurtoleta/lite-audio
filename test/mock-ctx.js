@@ -45,9 +45,19 @@ function baseNode(kind) {
         kind,
         id: _uid++,
         out: [],
+        // Port-resolved connection log (S6). connect(target, outIdx, inIdx) records
+        // the full [target, outIdx, inIdx] tuple here so the discrete tests can prove
+        // SMPTE lane order (which lane GainNode lands on which merger input). Additive:
+        // `out` keeps its exact prior shape (a flat list of targets) so no existing
+        // assertion moves; only tests that care about ports read `outPorts`.
+        outPorts: [],
         disconnected: 0,
-        connect(target) { n.out.push(target); return target; },
-        disconnect() { n.disconnected++; n.out.length = 0; },
+        connect(target, outIdx, inIdx) {
+            n.out.push(target);
+            n.outPorts.push([target, outIdx, inIdx]);
+            return target;
+        },
+        disconnect() { n.disconnected++; n.out.length = 0; n.outPorts.length = 0; },
     };
     return n;
 }
@@ -98,6 +108,37 @@ export function mockPanner3D() {
     n.positionX = mockParam(0);
     n.positionY = mockParam(0);
     n.positionZ = mockParam(0);
+    return n;
+}
+
+/**
+ * ChannelMergerNode stand-in for discrete-surround mode (S6). The pool builds one
+ * ChannelMerger(N) per discrete pool and connects each voice lane GainNode into a
+ * specific merger INPUT via connect(target, 0, k). numberOfInputs is fixed at
+ * construction; channelCount is 1 with mode 'explicit' (a merger sums one channel
+ * per input into an N-channel output), matching the spec's node contract. The
+ * baseNode connect log (outPorts) is what proves SMPTE lane order downstream.
+ */
+export function mockMerger(numberOfInputs = 6) {
+    const n = baseNode('merger');
+    n.numberOfInputs = numberOfInputs;
+    n.channelCount = 1;
+    n.channelCountMode = 'explicit';
+    return n;
+}
+
+/**
+ * BiquadFilterNode stand-in for the discrete LFE lowpass (S6). The pool builds one
+ * shared lowpass per discrete pool (every voice's lane-3 gain feeds it, and it feeds
+ * merger input 3), and writes .type at construction. frequency/Q/gain are mockParams
+ * so a test could count writes, though the pool leaves them at their defaults today.
+ */
+export function mockBiquad() {
+    const n = baseNode('biquad');
+    n.type = 'lowpass';
+    n.frequency = mockParam(350);
+    n.Q = mockParam(1);
+    n.gain = mockParam(0);
     return n;
 }
 
@@ -228,10 +269,26 @@ export function mockAudioBuffer(numberOfChannels, length, sampleRate) {
 
 const VALID_STATES = new Set(['suspended', 'running', 'interrupted', 'closed']);
 
-export function createMockContext({ sampleRate = 44100, state = 'suspended' } = {}) {
+export function createMockContext(opts = {}) {
+    const sampleRate = opts.sampleRate ?? 44100;
+    const state = opts.state ?? 'suspended';
     let currentTime = 0;
     let ctxState = state;
     const listeners = new Map();  // event -> Set<listener>
+
+    // Output-layout surface (S6). A real destination reports maxChannelCount (the
+    // sink's speaker count) plus the live channelCount triple. The layout detector
+    // reads maxChannelCount and accepts ONLY an integer >= 8, so the mock must be
+    // able to pin EXPLICITLY undefined and ABSENT as DISTINCT cases -- hence the
+    // 'maxChannelCount' in opts sentinel: omit the key -> default 2 (a plain stereo
+    // sink); pass it (even as undefined/null/NaN) -> that exact value, so the
+    // fail-closed matrix can test every rung. _setMaxChannelCount/_deleteMaxChannelCount
+    // let a single context walk the matrix without rebuilding.
+    const destination = baseNode('destination');
+    destination.maxChannelCount = 'maxChannelCount' in opts ? opts.maxChannelCount : 2;
+    destination.channelCount = 2;
+    destination.channelCountMode = 'max';
+    destination.channelInterpretation = 'speakers';
     // Every BufferSource this context hands out, in creation order. A source is
     // "live" once start() stamped it and stop() has not: the census hook below
     // counts those, which is how the HRTF prewarm tier proves the silent voice was
@@ -252,12 +309,14 @@ export function createMockContext({ sampleRate = 44100, state = 'suspended' } = 
         sampleRate,
         get currentTime() { return currentTime; },
         get state() { return ctxState; },
-        destination: baseNode('destination'),
+        destination,
 
         createGain: () => mockGain(),
         createStereoPanner: () => mockPanner(),
         createDelay: (maxDelayTime) => mockDelay(maxDelayTime),
         createPanner: () => mockPanner3D(),
+        createChannelMerger: (n) => mockMerger(n),
+        createBiquadFilter: () => mockBiquad(),
         createBufferSource: () => { const n = mockBufferSource(); sources.push(n); return n; },
         createBuffer: (ch, len, sr) => mockAudioBuffer(ch, len, sr),
         createMediaElementSource: (el) => mockMediaElementSource(el),
@@ -313,6 +372,14 @@ export function createMockContext({ sampleRate = 44100, state = 'suspended' } = 
 
         /** Advance the audio clock by dt seconds. */
         _advance(dt) { currentTime += dt; },
+
+        /** Pin destination.maxChannelCount to an exact value (S6). Lets a test walk
+         *  the fail-closed detection matrix on one context: undefined/null/NaN/2/8/12. */
+        _setMaxChannelCount(v) { destination.maxChannelCount = v; },
+
+        /** Delete destination.maxChannelCount entirely (S6): the ABSENT case, distinct
+         *  from an explicit undefined -- 'maxChannelCount' in destination becomes false. */
+        _deleteMaxChannelCount() { delete destination.maxChannelCount; },
 
         /** Force a state transition. Fires statechange. */
         _setState(newState) {

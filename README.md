@@ -330,6 +330,69 @@ widener nodes, no new hot-path branch).
 >   widener is stereo-only, `width > 0` on a `positional` / `hrtf` bus is a
 >   construction-time `RangeError` -- it does not compose with per-voice panning.
 
+### Discrete surround (7+1) and output-layout detection (v2.4.0)
+
+```js
+audio.layoutOf();                                          // -> '7.1' | 'stereo'
+audio.createBus('surround', { spatial: 'discrete', preset: '7.1' });
+audio.effectiveLayoutOf('surround');                       // -> '7.1' on an 8ch sink, 'stereo' on a 2ch sink
+// same setPosition() as positional/hrtf -- one zero-alloc scalar stamp:
+const h = audio.play('explosion', 1, 0, 1);
+audio.setPosition(h, x, y, z);                             // 8 lane gains solved on the ~10 Hz monitor
+```
+
+At `init()` the engine resolves its output layout **once** from
+`destination.maxChannelCount`, fail-closed: only a concrete integer `>= 8` earns
+`'7.1'`; every other reading is `'stereo'`. `null` is not zero -- an unknown sink
+is stereo, never optimistically 7.1.
+
+| `destination.maxChannelCount` | `layoutOf()` | Why |
+| ----------------------------- | ------------ | --- |
+| `8`, `12`, any integer `>= 8` | `'7.1'`      | a concrete surround sink |
+| `2`, `4`, `6`                 | `'stereo'`   | fewer than 8 channels (no `5.1`/`3.1` until a later release) |
+| `7.5` (non-integer)           | `'stereo'`   | not an integer channel count |
+| `'8'` (string)                | `'stereo'`   | not a `number` |
+| `undefined` / `null` / `NaN`  | `'stereo'`   | unverified -- fail closed |
+| property absent / no `destination` | `'stereo'` | nothing to trust |
+
+`{ spatial: 'discrete', preset: '7.1' }` builds a 7+1 bus (8 SMPTE lanes:
+`L R C LFE SL SR SBL SBR`) on the pool's discrete mode with per-voice **VBAP**
+panning driven by the same `setPosition()` -- but **only** when `layoutOf()` is
+`'7.1'`. On a smaller sink the request transparently **falls back to a working
+stereo bus** and `effectiveLayoutOf('surround')` returns `'stereo'` so you can see
+it. That fallback is **correct, not a failure**:
+
+| Sink                                   | `effectiveLayoutOf()` | Behaviour |
+| -------------------------------------- | --------------------- | --------- |
+| `>= 8` channels                        | `'7.1'`               | 8 lanes, VBAP panning, LFE send |
+| `< 8` channels (incl. a 2ch headset)   | `'stereo'`            | a plain stereo bus that plays normally |
+
+The 8 lane gains are solved on the cold `~10 Hz` monitor: `az = atan2(x, -z)`
+picks a constant-power speaker pair on a seven-lane ring
+(`g1 = cos(f*PI/2)`, `g2 = sin(f*PI/2)`), the LFE lane (index 3) gets an
+azimuth-invariant distance-only send (never a pan gain), and `y` (height) has no
+7+1 lane and is deliberately **not panned**. All 8 gains ride the same `20 ms` /
+`~10 Hz` `setTargetAtTime` cadence as position, into one reused
+`Float32Array(8)` -- zero allocation.
+
+> [!CAUTION]
+> **The 8-lane render needs a real `>= 8`-channel sink, and the destination mutation is process-global.**
+> - **The audible surround is only reachable on a true multichannel sink.** A
+>   virtual-surround headset that reports `maxChannelCount 2` (the common case) gets
+>   the **stereo fallback** -- that is the shipped, correct behaviour there, not a
+>   bug. Do **not** stack an engine-side `'hrtf'` bus on top of a headset that already
+>   virtualizes; `'discrete'` and `'hrtf'` are one `spatial` field and cannot combine
+>   anyway.
+> - **`destination.channelCount` is mutated once, process-wide.** Building the first
+>   discrete pool sets the destination to `8` / `'explicit'` / `'discrete'` (restored
+>   on `destroy()`). This changes downmix for the whole context, so mixing a discrete
+>   bus with an assumed-stereo external graph on the same `AudioContext` is
+>   unsupported. An engine with no discrete bus never touches the destination.
+> - **`preset` is `'7.1'`-only and discrete does not compose with `width`.** `'5.1'`
+>   and `'3.1'` reject loudly (a later release) rather than degrade silently, a
+>   `preset` on a non-discrete bus is a `RangeError`, and `width > 0` on a discrete
+>   bus is a `RangeError` (the stereo widener is stereo-only).
+
 ### Auto-suspend
 
 ```js
@@ -383,12 +446,14 @@ its `buses` with the defaults):
 ```js
 audio.createBus('pad', {
     meter:   false,       // tap an AnalyserNode for level() readouts
-    spatial: 'stereo',    // 'stereo' | 'positional' | 'hrtf' (per-voice pan mode)
+    spatial: 'stereo',    // 'stereo' | 'positional' | 'hrtf' | 'discrete' (per-voice pan mode)
+    preset:  '7.1',       // discrete-only: the 7+1 lane preset (S6 ships '7.1')
     width:   0,           // 0..1 arms the mono-safe Haas widener; omit to leave mono
 });
 ```
 
-- `width` is **omit-to-disable**: leaving it out builds no widener nodes (byte-identical to prior releases); a number in `[0, 1]` arms it and enables `setWidth()`. A non-finite / boolean / out-of-range value, or `width > 0` on a `positional`/`hrtf` bus, is a construction-time `RangeError`. A non-mono loaded source disarms it (see the Stereo width caution above).
+- `width` is **omit-to-disable**: leaving it out builds no widener nodes (byte-identical to prior releases); a number in `[0, 1]` arms it and enables `setWidth()`. A non-finite / boolean / out-of-range value, or `width > 0` on a `positional`/`hrtf`/`discrete` bus, is a construction-time `RangeError`. A non-mono loaded source disarms it (see the Stereo width caution above).
+- `spatial: 'discrete'` builds a 7+1 surround bus **only** when `layoutOf()` is `'7.1'` (a sink reporting `>= 8` channels); on a smaller sink it falls back to a working stereo bus and `effectiveLayoutOf(name)` reports `'stereo'` (correct, not a failure). `preset` is valid only with `spatial: 'discrete'` (a `RangeError` elsewhere), S6 ships only `'7.1'`, and `'5.1'`/`'3.1'` reject loudly rather than degrade. See the Discrete surround section above.
 
 ## Migration from lite-audio-manager
 

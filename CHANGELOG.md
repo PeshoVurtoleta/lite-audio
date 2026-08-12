@@ -1,5 +1,70 @@
 # Changelog
 
+## 2.4.0
+
+Fail-closed output-layout detection and a 7+1 discrete-surround bus family,
+session S6 of the spatial roadmap (closes SP-08, SP-09). The engine now resolves
+its output layout once at `init()` and can build a `spatial: 'discrete'` bus that
+rides `@zakkster/lite-audio-pool`'s discrete mode (8 SMPTE lanes) with per-voice
+VBAP panning driven by the same `setPosition()`.
+
+Additive and default-off: no existing bus record, `play()`, `stop()`, or
+`setPosition()` byte moves, and `setPosition()` gains ZERO new branches (a
+discrete bus reuses the identical positional scratch). The only new per-tick work
+is one `_flushLanes()` over a `this._discreteBuses` array that is empty on every
+engine built today, plus one integer compare in `_flushPositions`. The
+`HashParity` `stop()` AND `play()` goldens do not move (S6 adds no `play()` arg).
+
+A discrete request on a sink that does not report a concrete integer `>= 8`
+channels transparently builds a WORKING stereo bus and reports the effective
+layout via `effectiveLayoutOf()`. That is correct, not a failure: on a 2-channel
+sink (including a virtual-surround headset that reports `maxChannelCount 2`) the
+discrete request falls back to stereo and plays normally.
+
+### Added
+
+- `createBus(name, { spatial: 'discrete', preset: '7.1' })` -- a 7+1
+  discrete-surround bus. Under a detected `7.1` layout it builds the pool in
+  discrete mode with 8 lanes (`L R C LFE SL SR SBL SBR`) and enables
+  `setPosition()` for per-voice VBAP panning; under any smaller layout it fails
+  closed to a plain stereo bus (`lanes = 0`) that plays normally. `preset` is
+  valid only with `spatial: 'discrete'` (a preset elsewhere is a `RangeError`);
+  S6 ships only `'7.1'`, and `'5.1'` / `'3.1'` reject loudly (they land in a later
+  release) rather than silently degrade. `spatial: 'discrete'` does not compose
+  with a `width` widener (`RangeError`) and, being a single enum field, cannot
+  combine with `'hrtf'`.
+- `layoutOf()` -- the engine's detected output layout, `'7.1'` or `'stereo'`,
+  resolved once at `init()` from `destination.maxChannelCount` and cached. Fail
+  closed: only a concrete integer `>= 8` yields `'7.1'`; absent / `undefined` /
+  `null` / `NaN` / non-integer / string / `< 8` all yield `'stereo'`. `null` is
+  not zero -- an unknown sink is stereo, never optimistically 7.1.
+- `effectiveLayoutOf(busName)` -- `'7.1'` when a discrete bus's 8 lanes were
+  actually built, `'stereo'` when a discrete request fell back, or `null` on a
+  non-discrete or unknown bus. This is how a caller learns whether the fallback
+  happened, and that a discrete request on a 2-channel sink returning `'stereo'`
+  here is the correct, supported outcome, not an error.
+- The 8-lane solver: `az = atan2(x, -z)` normalized to `[0, 360)` picks a
+  containing constant-power (VBAP) speaker pair on a seven-lane ring
+  (`g1 = cos(f*PI/2)`, `g2 = sin(f*PI/2)`, `g1^2 + g2^2 == 1`); the LFE lane
+  (index 3) receives an azimuth-invariant distance-only send, never a VBAP gain;
+  `y` (height) has no 7+1 lane and is deliberately not panned. All 8 lane gains
+  are written with `setTargetAtTime` at the same `20 ms` / `~10 Hz` cadence as
+  position, into one reused module `Float32Array(8)` -- zero allocation,
+  rate-bounded to `~10` native events per lane per second.
+
+### Changed
+
+- `defineSounds()` resolves the pool's panner option at cold pool build: a
+  discrete bus that earned its 8 lanes builds `{ panner: 'discrete', channels: 8 }`;
+  every other bus -- including a discrete request that fell back to stereo -- keeps
+  the identity mapping, byte-identical to prior releases.
+- `destination.channelCount` / `channelCountMode` / `channelInterpretation` are set
+  to `8` / `'explicit'` / `'discrete'` ONLY on the first discrete pool build (this
+  is process-global for the context) and the prior triple is restored on
+  `destroy()`. An engine with no discrete bus never touches the destination downmix.
+  A caller mixing a discrete bus with an assumed-stereo external graph on the same
+  context is documented as unsupported (see `decisions/0008-detected-layout.md`).
+
 ## 2.3.0
 
 Per-bus stereo width, session S5 of the spatial roadmap (closes SP-04, SP-05,

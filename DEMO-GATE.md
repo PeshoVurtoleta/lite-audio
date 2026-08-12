@@ -12,11 +12,17 @@ The two claims:
    string is created per animation frame. This includes scene 5, whose orbiting
    source calls `setPosition(handle, x, y, z)` every frame - a zero-alloc scratch
    stamp on the caller frame (the PannerNode writes ride the shared ~10 Hz
-   monitor), and whose trail is a preallocated ring, not a per-frame array.
+   monitor), and whose trail is a preallocated ring, not a per-frame array. It also
+   includes scene 6 (stereo width), whose goniometer reads the widened bus's two
+   channels into two preallocated `Float32Array`s (`gonioL`/`gonioR`) per frame and
+   reduces the L/R correlation with scalar accumulators - no per-frame array, no
+   `toFixed` outside the throttle.
 2. **Switching scenes allocates nothing.** No AnalyserNode, listener, or DOM node
-   is created when you move between the five scenes, so a page left running does
+   is created when you move between the six scenes, so a page left running does
    not climb. The two spatial buses (scene 5) are built once at engine boot, not
-   on a switch.
+   on a switch; scene 6's channel splitter, its two per-channel analysers and their
+   muted sink are built once in `attachScope()` and only re-connected to the new
+   bus on a rebuild, so a scene switch never constructs them.
 
 ## Why it holds by construction
 
@@ -24,7 +30,13 @@ The two claims:
   arrays, sized once at module load.
 - The single `AnalyserNode` (the sfx-bus scope tap) and its muted sink are
   allocated once in `attachScope()` and reused across every rebuild - a scene
-  switch never touches them.
+  switch never touches them. Scene 6's goniometer taps (a `ChannelSplitter` +
+  two analysers + a muted sink on the widened bus) are built the same way, once,
+  and only re-`connect`ed to the new `busNode` on a rebuild.
+- Scene 6's sustained pad is a re-fired MONO SFX voice on the widened bus. The
+  re-fire is cold - gated on `isPlaying`/ended in `drawWidth`, never a per-frame
+  allocation - and the soak never sounds it (a per-iteration `play()` would steal
+  a channel). Mono keeps the widener armed; a non-mono source would disarm it.
 - Every `textContent` write is behind a `frameCount & TELEM_MASK` throttle
   (~7.5 Hz), and the strings it builds are the only per-write allocation the page
   makes; they are not in the draw path.
@@ -43,10 +55,11 @@ protocol below should both read flat.
    Without the flag `performance.memory` is bucketed to ~5 MB and the delta is
    noise; the button still runs but reports a coarse number.
 2. Serve and open the page (see below), boot the engine.
-3. Click **run soak (100 x switch)** in the footer. It selects all five scenes
-   100 times (500 switches), drawing each once, and reports the used-heap delta.
-   The soak draws scene 5's field but never sounds it (a per-iteration play() would
-   steal a channel), so the alloc reading is not polluted by voice churn.
+3. Click **run soak (100 x switch)** in the footer. It selects all six scenes
+   100 times (600 switches), drawing each once, and reports the used-heap delta.
+   The soak draws scene 5's field and scene 6's goniometer but never sounds their
+   voices (a per-iteration play() would steal a channel), so the alloc reading is
+   not polluted by voice churn.
 4. Expect a delta within a few hundred KB - dominated by the throttled log
    strings and GC timing, not by the loop. The readout turns red past 1 MB.
 
@@ -65,7 +78,7 @@ profile, which is not fooled by `performance.memory` bucketing:
    while switching scenes repeatedly. Blue allocation bars should appear only at
    the throttle interval (the log strings), never once per frame and never on the
    switch itself.
-4. Take a heap snapshot, switch all five scenes ~50 times, force GC (the trash
+4. Take a heap snapshot, switch all six scenes ~50 times, force GC (the trash
    icon), take a second snapshot, and compare. Retained size should be flat and
    no detached `AnalyserNode` or `AudioNode` should appear in the delta.
 

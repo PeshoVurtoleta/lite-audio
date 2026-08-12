@@ -755,7 +755,7 @@
 
 <header>
     <div>
-        <h1>SIGNAL // NOISE <span>/ @zakkster/lite-audio v2.2.0 / five scenes, real traces</span></h1>
+        <h1>SIGNAL // NOISE <span>/ @zakkster/lite-audio v2.3.0 / six scenes, real traces</span></h1>
         <p>Every phosphor trace on this page is actual signal - AnalyserNode waveforms, RMS meters, and the live
             PannerNode position all read straight off the engine's buses into pre-allocated Float32Arrays. Nothing here
             is drawn from a formula. The frame loop allocates nothing - even scene 5, which calls setPosition() every
@@ -771,6 +771,7 @@
     <button data-scene="2" aria-pressed="false">3 / crossfade deck</button>
     <button data-scene="3" aria-pressed="false">4 / unlock theater</button>
     <button data-scene="4" aria-pressed="false">5 / spatial field</button>
+    <button data-scene="5" aria-pressed="false">6 / stereo width</button>
 </nav>
 
 <!-- ============================ VOICE GRID ============================== -->
@@ -1029,6 +1030,58 @@
     </section>
 </main>
 
+<!-- ============================ STEREO WIDTH ========================== -->
+<main id="deck-width" class="deck" hidden>
+    <section id="p-gonio" class="panel">
+        <div class="panel-title"><span>goniometer / L vs R Lissajous, read off the widened bus</span><b id="wd-corr">corr
+            +1.00</b></div>
+        <div class="screen">
+            <canvas id="cv-gonio"></canvas>
+        </div>
+        <p class="note"><b>Headphones on.</b> This plots the widened bus's left channel against its right, straight off
+            two <em>AnalyserNode</em>s on a <em>ChannelSplitter</em> - real signal, not a formula. At <b>width 0</b> the
+            trace is a 45-degree line: L and R are bit-identical (mono, a byte-identical bypass). Open the knob and a
+            mono-safe <b>Haas</b> delay/pan pair fans it into a blob. The correlation meter below turns amber then
+            <b>red</b> as L and R decorrelate - that is the mono-downmix comb-filter danger (SP-04) made visible.</p>
+    </section>
+
+    <section id="p-wd-sig" class="panel">
+        <div class="panel-title"><span>widener state / widthOf() + makeup, read off the bus</span><b id="wd-hint">unlock
+            on scene 4 first</b></div>
+        <dl class="readout">
+            <dt>widthOf(width_demo)</dt>
+            <dd id="wd-armed">-</dd>
+            <dt>makeup gain</dt>
+            <dd id="wd-makeup">automatic (~0 dB)</dd>
+            <dt>source</dt>
+            <dd id="wd-source">mono (armed)</dd>
+        </dl>
+        <p class="note">The Haas widener rides between the SFX pool and the bus gain, so only pool voices pass through it;
+            music tracks connect straight to the bus and bypass it. It is <b>mono-source only</b>: load a stereo asset
+            and <em>defineSounds</em> disarms it (<em>widthOf</em> returns <b>null</b>) - a Haas pair on an
+            already-stereo image only smears it. <b>Makeup gain is automatic</b>, so opening width holds the level flat
+            (SP-05); you are hearing width, not volume.</p>
+    </section>
+
+    <section id="p-wd-ctl" class="panel">
+        <div class="panel-title"><span>width control</span><b>no on/off - 0 is the bypass</b></div>
+        <div class="slider">
+            <label for="s-wd">width</label>
+            <input id="s-wd" type="range" min="0" max="100" step="1" value="0"/>
+            <output id="o-wd">width 0.00</output>
+        </div>
+        <div class="row">
+            <span class="lbl">source</span>
+            <button id="b-wd-play" class="on" aria-pressed="true">pad playing</button>
+            <span class="note">a sustained mono drone on the widened bus</span>
+        </div>
+        <p class="note"><b>Budget this for headphones or stereo speakers.</b> On a single-speaker or mono-downmix device
+            the delayed copies comb-filter - the sound goes hollow and phasey (SP-06). There is deliberately <b>no
+            boolean on/off</b>, only the width knob: <b>0 is a bit-identical bypass</b>, so a game can leave the bus
+            armed and pay nothing until it opens the knob. Makeup gain holds the level flat as width opens (SP-05).</p>
+    </section>
+</main>
+
 <!-- ============================ SHARED RACK ============================ -->
 <div class="rack">
     <section class="panel">
@@ -1071,7 +1124,7 @@
     </div>
     <div class="col">
         <h2>zero-GC gate, on the page</h2>
-        <p class="note">Switch all five scenes 100 times and read the heap delta. A demo that allocates while displaying
+        <p class="note">Switch all six scenes 100 times and read the heap delta. A demo that allocates while displaying
             a heap graph is the worst possible advertisement, so this one does not. Chrome only - needs
             <em>performance.memory</em>; run with <em>--enable-precise-memory-info</em> for a tight number. The manual
             DevTools protocol is in <a href="../DEMO-GATE.md">DEMO-GATE.md</a>.</p>
@@ -1124,6 +1177,12 @@
     const SPATIAL_SOUND = ['orbit_eq', 'orbit_hr'];
     const ORBIT_R_MAX = 5;                             // world radius mapped to the radar edge
 
+    // Scene 6: one plain stereo bus with the v2.3.0 mono-safe Haas widener armed
+    // (width: 0 == byte-identical bypass). Kept OUT of BUSES (like the spatial buses)
+    // so it never appears in the grid/VU/strips. A width > 0 on a spatial bus throws,
+    // so this is deliberately a stereo bus; only its SFX pool voices pass the widener.
+    const WIDTH_BUS = 'width_demo';
+
     const TELEM_MASK = 0x07;               // ~7.5 Hz textContent throttle at 60fps
     const SCOPE_N = 512;                    // AnalyserNode fftSize
     const TRACE_CAP = 480, TRACE_MASK = 479;
@@ -1142,6 +1201,10 @@
         // Scene 5 orbit source, one per spatial bus (same buffer, two panner modes).
         ['orbit_eq', SPATIAL_EQ, synthOrbit, 0.85, 0.00],
         ['orbit_hr', SPATIAL_HR, synthOrbit, 0.85, 0.00],
+        // Scene 6 width pad: a sustained MONO drone that plays as an SFX pool voice,
+        // so it passes through the widener. Mono keeps the widener armed (a non-mono
+        // source disarms it); re-fired cold to sustain (see drawWidth).
+        ['width_pad', WIDTH_BUS, synthPad, 0.7, 0.00],
     ];
     // Strafe fires these, cycling, one per bus so both pools fill.
     const STRAFE_SFX = ['laser', 'hit', 'coin'];
@@ -1189,6 +1252,7 @@
         document.getElementById('deck-xfade'),
         document.getElementById('deck-unlock'),
         document.getElementById('deck-spatial'),
+        document.getElementById('deck-width'),
     ];
 
     const $bState = document.getElementById('b-state');
@@ -1265,6 +1329,15 @@
     const $sSpSpeed = document.getElementById('s-sp-speed');
     const $oSpSpeed = document.getElementById('o-sp-speed');
 
+    // scene 6: stereo width
+    const $wdCorr = document.getElementById('wd-corr');
+    const $wdHint = document.getElementById('wd-hint');
+    const $wdArmed = document.getElementById('wd-armed');
+    const $wdSource = document.getElementById('wd-source');
+    const $sWd = document.getElementById('s-wd');
+    const $oWd = document.getElementById('o-wd');
+    const $bWdPlay = document.getElementById('b-wd-play');
+
     // ==========================================================================
     // Canvas
     // ==========================================================================
@@ -1288,7 +1361,8 @@
     const cvXfade = mkCanvas('cv-xfade');
     const cvRings = mkCanvas('cv-rings');
     const cvRadar = mkCanvas('cv-radar');
-    const ALL_CV = [cvGrid, cvVScope, cvDuck, cvVu, cvXfade, cvRings, cvRadar];
+    const cvGonio = mkCanvas('cv-gonio');
+    const ALL_CV = [cvGrid, cvVScope, cvDuck, cvVu, cvXfade, cvRings, cvRadar, cvGonio];
     let needResize = 1;
 
     function sizeAll() {
@@ -1496,6 +1570,48 @@
         });
     }
 
+    // Scene 6 width pad: a 4 s MONO drone with slow filter + amplitude movement so
+    // the goniometer always has continuous signal. Detuned saws through a sweeping
+    // lowpass, a sub sine for body; fades to silence at both ends so a re-fire loops
+    // seamlessly. MONO (OfflineAudioContext(1,...)) - this is required, a non-mono
+    // buffer disarms the widener.
+    function synthPad() {
+        return render(4.0, (off, out) => {
+            const lp = off.createBiquadFilter();
+            lp.type = 'lowpass';
+            lp.Q.value = 4;
+            lp.frequency.setValueAtTime(600, 0);
+            lp.frequency.linearRampToValueAtTime(1400, 2);
+            lp.frequency.linearRampToValueAtTime(600, 4);
+            const g = off.createGain();
+            g.gain.setValueAtTime(0.0001, 0);
+            g.gain.linearRampToValueAtTime(0.5, 0.4);
+            g.gain.setValueAtTime(0.5, 3.5);
+            g.gain.exponentialRampToValueAtTime(0.0001, 4.0);
+            lp.connect(g);
+            g.connect(out);
+            const base = [110, 164.81, 220];
+            for (let i = 0; i < base.length; i++) {
+                const o = off.createOscillator();
+                o.type = 'sawtooth';
+                o.frequency.value = base[i];
+                o.detune.value = (i - 1) * 6;   // slow beating between voices
+                o.connect(lp);
+                o.start(0);
+                o.stop(4.0);
+            }
+            const sub = off.createOscillator();
+            sub.type = 'sine';
+            sub.frequency.value = 55;
+            const subG = off.createGain();
+            subG.gain.value = 0.2;
+            sub.connect(subG);
+            subG.connect(lp);
+            sub.start(0);
+            sub.stop(4.0);
+        });
+    }
+
     // Eight seconds each: long enough to crossfade over, ~1 MB of WAV per pair.
     function synthTheme() {
         return render(8.0, (off, out) => {
@@ -1700,6 +1816,16 @@
     // position text cache (formatted on throttle pass, not in the frame loop)
     const posText = ['0.0 / 0.0s', '0.0 / 0.0s'];
 
+    // scene 6: stereo width. The goniometer taps the widened bus through a splitter +
+    // two analysers (built ONCE in attachScope). gonioL/gonioR are read into every
+    // frame; correlation is a scalar reduction. No per-frame allocation.
+    let gonioSplit = null, gonioAnL = null, gonioAnR = null, gonioSink = null;
+    const gonioL = new Float32Array(SCOPE_N);
+    const gonioR = new Float32Array(SCOPE_N);
+    let gonioCorr = 1;                   // Pearson L/R correlation, updated per frame
+    let widthHandle = -1;                // sustained pad voice, re-fired cold
+    let widthPadOn = true;               // play/stop toggle for the pad
+
     // handle table: parallel typed columns, no per-frame allocation
     const hHandle = new Float64Array(HANDLE_ROWS);
     const hStatus = new Uint8Array(HANDLE_ROWS);
@@ -1833,6 +1959,11 @@
         trailHead = 0;
         trailFill = 0;
 
+        // Scene 6: a plain stereo bus with the mono-safe Haas widener armed at width 0
+        // (a byte-identical bypass). Kept out of BUSES so it never clutters the mixer.
+        engine.createBus(WIDTH_BUS, {width: 0});
+        widthHandle = -1;
+
         attachScope();
         buildStrips();
         bindSignals();
@@ -1881,6 +2012,27 @@
         }
         const node = engine.busNode('sfx');
         if (node) node.connect(scopeAnalyser);
+
+        // Scene 6 goniometer: a channel splitter + two per-channel analysers on the
+        // WIDENED bus, routed through a muted sink so the taps are pulled. Built ONCE
+        // for the page's life; a rebuild only re-connects the new busNode below, so a
+        // scene switch never constructs any of it (mirrors the sfx scope tap).
+        if (!gonioSplit) {
+            gonioSplit = ctx.createChannelSplitter(2);
+            gonioAnL = ctx.createAnalyser();
+            gonioAnR = ctx.createAnalyser();
+            gonioAnL.fftSize = SCOPE_N;
+            gonioAnR.fftSize = SCOPE_N;
+            gonioSink = ctx.createGain();
+            gonioSink.gain.value = 0;
+            gonioSink.connect(ctx.destination);
+            gonioSplit.connect(gonioAnL, 0);
+            gonioSplit.connect(gonioAnR, 1);
+            gonioAnL.connect(gonioSink);
+            gonioAnR.connect(gonioSink);
+        }
+        const wnode = engine.busNode(WIDTH_BUS);
+        if (wnode) wnode.connect(gonioSplit);
     }
 
     function disposeEffects() {
@@ -1921,6 +2073,7 @@
             $bGesture.disabled = on;
             $xfHint.textContent = on ? 'unlocked' : 'unlock on scene 4 first';
             $spHint.textContent = on ? 'live: drag the field or let it orbit' : 'unlock on scene 4 first';
+            $wdHint.textContent = on ? 'live: ride the width knob' : 'unlock on scene 4 first';
             logPush('state', 'unlocked -> ' + on);
             uPush('state', 'unlocked -> ' + on);
         }));
@@ -2572,6 +2725,117 @@
     }
 
     // ==========================================================================
+    // Stereo width (scene 6): live goniometer off the widened bus.
+    // Allocates nothing: gonioL/gonioR are preallocated, the correlation is a scalar
+    // reduction, the pad re-fire is cold (gated on ended), and the only strings are
+    // built on the throttle pass in throttledTelemetry().
+    // ==========================================================================
+
+    function drawWidth() {
+        const c = cvGonio.c, w = cvGonio.w, h = cvGonio.h;
+        c.fillStyle = C_CLEAR;
+        c.fillRect(0, 0, w, h);
+
+        // Re-fire the sustained MONO pad so the goniometer always has signal. Cold:
+        // gated on ended/isPlaying, never a per-frame allocation. The soak never
+        // sounds it (a play() per iteration would steal a channel).
+        const live = engine.unlocked().peek();
+        if (!soaking && live && widthPadOn) {
+            if (widthHandle < 0 || !engine.isPlaying(widthHandle)) {
+                widthHandle = engine.play('width_pad', 0.7, 0, 1);
+            }
+        }
+
+        const cx = w * 0.5, cy = h * 0.5;
+        const R = Math.min(w, h) * 0.42;
+
+        // Read the widened bus's two channels; compute Pearson L/R correlation with
+        // scalar accumulators (no temp arrays).
+        if (gonioAnL) {
+            gonioAnL.getFloatTimeDomainData(gonioL);
+            gonioAnR.getFloatTimeDomainData(gonioR);
+        }
+        let sLL = 0, sRR = 0, sLR = 0;
+        for (let i = 0; i < SCOPE_N; i++) {
+            const l = gonioL[i], r = gonioR[i];
+            sLL += l * l;
+            sRR += r * r;
+            sLR += l * r;
+        }
+        const denom = Math.sqrt(sLL * sRR);
+        gonioCorr = denom > 1e-9 ? sLR / denom : 1;
+        // Safe (in phase) -> caution -> danger (decorrelated, mono-downmix comb-filter).
+        const col = gonioCorr >= 0.6 ? C_PHOS : (gonioCorr >= 0.2 ? C_AMBER : C_HOT);
+
+        // Axes + the 45-degree mono reference (L === R at width 0).
+        c.strokeStyle = C_GRID;
+        c.lineWidth = 1;
+        c.beginPath();
+        c.moveTo(cx - R, cy);
+        c.lineTo(cx + R, cy);
+        c.moveTo(cx, cy - R);
+        c.lineTo(cx, cy + R);
+        c.stroke();
+        c.strokeStyle = C_DIM;
+        c.globalAlpha = 0.5;
+        c.setLineDash([3, 3]);
+        c.beginPath();
+        c.moveTo(cx - R, cy + R);
+        c.lineTo(cx + R, cy - R);
+        c.stroke();
+        c.setLineDash([]);
+        c.globalAlpha = 1;
+
+        c.font = FONT_M;
+        c.fillStyle = C_DIM;
+        c.fillText('L', cx + R - 8, cy - 4);
+        c.fillText('R', cx + 4, cy - R + 10);
+        c.fillText('mono (L=R)', cx - R + 4, cy + R - 4);
+
+        // The Lissajous: x = L, y = R (y up). Mono collapses to the diagonal; width
+        // fans it into a blob. Zero allocation in the loop.
+        c.strokeStyle = col;
+        c.lineWidth = 1;
+        c.globalAlpha = 0.85;
+        c.beginPath();
+        for (let i = 0; i < SCOPE_N; i++) {
+            const px = cx + gonioL[i] * R;
+            const py = cy - gonioR[i] * R;
+            if (i === 0) c.moveTo(px, py);
+            else c.lineTo(px, py);
+        }
+        c.stroke();
+        c.globalAlpha = 1;
+
+        // Correlation meter along the bottom: -1 (danger) .. +1 (mono-safe).
+        const my = h - 12, mx0 = 10, mw = w - 20;
+        c.fillStyle = 'rgba(255,255,255,0.03)';
+        c.fillRect(mx0, my, mw, 6);
+        // Danger band: correlation below 0 is where a mono downmix combs.
+        c.fillStyle = C_HOT;
+        c.globalAlpha = 0.18;
+        c.fillRect(mx0, my, mw * 0.5, 6);
+        c.globalAlpha = 1;
+        const frac = (gonioCorr + 1) * 0.5;   // -1..+1 -> 0..1
+        c.fillStyle = col;
+        c.fillRect(mx0 + mw * 0.5, my, mw * (frac - 0.5), 6);
+        c.fillStyle = C_INK;
+        c.fillRect(mx0 + mw * frac - 1, my - 2, 2, 10);
+        c.fillStyle = C_DIM;
+        c.fillText('-1 comb', mx0, my - 4);
+        c.textAlign = 'right';
+        c.fillText('+1 mono-safe', mx0 + mw, my - 4);
+        c.textAlign = 'left';
+
+        if (!live) {
+            c.fillStyle = C_AMBER;
+            c.textAlign = 'center';
+            c.fillText('unlock on scene 4 to sound the pad', cx, cy + R * 0.62);
+            c.textAlign = 'left';
+        }
+    }
+
+    // ==========================================================================
     // Unlock theater: FSM paint + scripted interruption
     // ==========================================================================
 
@@ -2644,6 +2908,8 @@
                 drawRings();
             } else if (scene === 4) {
                 drawSpatial();
+            } else if (scene === 5) {
+                drawWidth();
             }
 
             if ((frameCount & TELEM_MASK) === 0) {
@@ -2717,6 +2983,19 @@
             $spWarm.style.color = warmed ? C_PHOS : C_DIM;
         }
 
+        if (scene === 5) {
+            // Correlation onto the panel title; color-code the danger.
+            $wdCorr.textContent = 'corr ' + (gonioCorr >= 0 ? '+' : '') + gonioCorr.toFixed(2);
+            $wdCorr.style.color = gonioCorr >= 0.6 ? C_PHOS : (gonioCorr >= 0.2 ? C_AMBER : C_HOT);
+            // widthOf() reads the armed width, or null when unarmed/disarmed.
+            const armed = engine.widthOf(WIDTH_BUS);
+            $wdArmed.textContent = armed === null ? 'disarmed' : armed.toFixed(2);
+            const playing = widthHandle >= 0 && engine.isPlaying(widthHandle);
+            $wdSource.textContent = armed === null
+                ? 'stereo (disarmed)'
+                : (playing ? 'mono (armed)' : 'mono (armed, idle)');
+        }
+
         // Heap readout (Chrome). Reused string, no object churn.
         const mem = performance.memory;
         if (mem) {
@@ -2746,6 +3025,12 @@
             $tabBtns[i].classList.toggle('on', on);
             $tabBtns[i].setAttribute('aria-pressed', on ? 'true' : 'false');
             $decks[i].hidden = !on;
+        }
+        // Leaving scene 6: stop the sustained pad (the orbit-voice discipline). Scene 6
+        // re-fires it in drawWidth on enter; nothing is allocated here.
+        if (engine && scene !== 5 && widthHandle >= 0) {
+            engine.stop(widthHandle);
+            widthHandle = -1;
         }
         needResize = 1;
     }
@@ -2964,6 +3249,25 @@
         dragSpatial = false;
     });
 
+    // ---- scene 6: stereo width ----
+    $sWd.addEventListener('input', () => {
+        const wdt = ($sWd.value | 0) / 100;
+        if (engine) engine.setWidth(WIDTH_BUS, wdt);
+        $oWd.textContent = 'width ' + wdt.toFixed(2);
+    });
+    $oWd.textContent = 'width ' + (($sWd.value | 0) / 100).toFixed(2);
+
+    $bWdPlay.addEventListener('click', () => {
+        widthPadOn = !widthPadOn;
+        $bWdPlay.classList.toggle('on', widthPadOn);
+        $bWdPlay.setAttribute('aria-pressed', widthPadOn ? 'true' : 'false');
+        $bWdPlay.textContent = widthPadOn ? 'pad playing' : 'pad stopped';
+        if (!widthPadOn && widthHandle >= 0) {
+            engine.stop(widthHandle);
+            widthHandle = -1;
+        }
+    });
+
     // ---- shared ----
     $bStopAll.addEventListener('click', () => {
         engine.stopAll();
@@ -2988,7 +3292,7 @@
         $bMigrate.setAttribute('aria-pressed', open ? 'true' : 'false');
     });
 
-    // Soak: switch all five scenes 100 times, read the heap delta. Because nothing
+    // Soak: switch all six scenes 100 times, read the heap delta. Because nothing
     // is allocated on a scene switch (no analysers or listeners are created here),
     // this should hold flat. See DEMO-GATE.md for the DevTools protocol.
     $bSoak.addEventListener('click', async () => {
@@ -3001,7 +3305,7 @@
         $soakOut.className = '';
         $soakOut.textContent = 'running...';
         for (let n = 0; n < 100; n++) {
-            for (let s = 0; s < 5; s++) {
+            for (let s = 0; s < 6; s++) {
                 selectScene(s);
                 sizeAll();
                 needResize = 0;
@@ -3020,8 +3324,10 @@
                         drawRings();
                     } else if (s === 3) {
                         paintFsm();
-                    } else {
+                    } else if (s === 4) {
                         drawSpatial();
+                    } else {
+                        drawWidth();
                     }
                 }
             }
@@ -3035,10 +3341,10 @@
         const after = mem ? mem.usedJSHeapSize : 0;
         if (mem) {
             const delta = (after - before) / 1024;
-            $soakOut.textContent = '500 switches / heap delta ' + (delta >= 0 ? '+' : '') + delta.toFixed(0) + ' KB';
+            $soakOut.textContent = '600 switches / heap delta ' + (delta >= 0 ? '+' : '') + delta.toFixed(0) + ' KB';
             $soakOut.className = Math.abs(delta) > 1024 ? 'warn' : '';
         } else {
-            $soakOut.textContent = '500 switches done (no performance.memory - use DevTools)';
+            $soakOut.textContent = '600 switches done (no performance.memory - use DevTools)';
         }
         $bSoak.disabled = false;
     });

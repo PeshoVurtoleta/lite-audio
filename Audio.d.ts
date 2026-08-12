@@ -111,6 +111,13 @@ export interface DuckOnOptions {
 export interface CreateBusOptions {
     /** Tap an AnalyserNode for level() readouts. Default false (no analyser allocated). */
     meter?: boolean;
+    /**
+     * Per-voice pan mode, decided at bus construction and captured into the
+     * pool. Default 'stereo' (a StereoPanner per voice, equalpower, byte-identical
+     * to prior releases). 'positional' builds a PannerNode per voice and enables
+     * setPosition(). An unknown value fails closed (RangeError).
+     */
+    spatial?: 'stereo' | 'positional';
 }
 
 export interface AutoSuspendOptions {
@@ -152,6 +159,9 @@ export interface LiteAudioOptions {
     setTimeout?: (cb: () => void, ms: number) => any;
     clearTimeout?: (id: any) => void;
 }
+
+/** Package version, in lockstep with package.json. */
+export const VERSION: string;
 
 export class LiteAudio {
     constructor(opts?: LiteAudioOptions);
@@ -198,6 +208,18 @@ export class LiteAudio {
 
     /** Is this exact voice still sounding? False if stolen, stopped, or played out. */
     isPlaying(handle: VoiceHandle | Skipped | TrackStarted): boolean;
+
+    /**
+     * Set a positional voice's 3D position (a bus built with { spatial: 'positional' }).
+     * Takes the SAME handle play() returned. Caller-frame safe -- call it every frame:
+     * it does NO param write, it only stamps a preallocated scratch buffer and a dirty
+     * bit (zero allocation). The positionX/Y/Z writes ride the shared ~10 Hz monitor,
+     * throttled with a 0.02 s time constant, so per-frame calls collapse to ~10 native
+     * param events/second per axis. Fail-closed: a stereo-bus handle, an out-of-range
+     * channel, or a stolen/dead/bogus voice (incl. the negative sentinels) is a silent
+     * no-op; steal-safety is resolved at flush via a generation-checked voice lookup.
+     */
+    setPosition(handle: VoiceHandle | Skipped | TrackStarted, x: number, y: number, z: number): void;
 
     /** Name of the bus that issued this handle, or null (incl. for any sentinel). */
     busOf(handle: VoiceHandle | Skipped | TrackStarted): string | null;
@@ -310,8 +332,9 @@ export class LiteAudio {
     /**
      * Create a bus after init(). Idempotent; rejects the reserved name 'master';
      * fails closed (RangeError) at the 2^21 handle ceiling. `{ meter: true }` taps
-     * an AnalyserNode for level(). A bus gets its pool when a sound is first routed
-     * to it via defineSounds(). See decisions/0006.
+     * an AnalyserNode for level(). `{ spatial: 'positional' }` builds a PannerNode
+     * per voice and enables setPosition() (default 'stereo'). A bus gets its pool
+     * when a sound is first routed to it via defineSounds(). See decisions/0006.
      */
     createBus(name: string, opts?: CreateBusOptions): unknown;
 

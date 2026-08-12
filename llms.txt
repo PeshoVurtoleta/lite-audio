@@ -5,10 +5,11 @@
 npm i @zakkster/lite-audio @zakkster/lite-signal @zakkster/lite-audio-pool
 
 ## Import
-import { LiteAudio } from '@zakkster/lite-audio';
+import { LiteAudio, VERSION } from '@zakkster/lite-audio';
+// VERSION is the package version string, in lockstep with package.json.
 
 ## Key Facts
-- Zero deps of its own; two peers: @zakkster/lite-signal (^1.3), @zakkster/lite-audio-pool (^1.1)
+- Zero deps of its own; two peers: @zakkster/lite-signal (^1.3), @zakkster/lite-audio-pool (^1.2)
 - Signal-driven control surface: bus volumes, master mute, ctx state, per-sound and per-track load state are all reactive
 - Bus writes go through setTargetAtTime for click-free transitions (10 ms time constant)
 - Pre-unlock play() calls are queued (bounded, latest-per-sound), flushed on first user gesture
@@ -21,6 +22,7 @@ import { LiteAudio } from '@zakkster/lite-audio';
 - SFX handles are bus-tagged: busIndex * 2^32 + poolHandle. Raw pool handles collide across buses (every pool starts at channel 0 / generation 0), so the tag is what makes stop() name one voice
 - Music tracks are singletons addressed by name, not handle - stopTrack('menu_bg') not stop(handle)
 - v2.0.0 ships SFX + music + mix intelligence (ducking, snapshots, auto-suspend, per-bus meters, dynamic buses) + a `./compat` drop-in for lite-audio-manager (the Howler overlay). Migrate by changing one import; no Howler underneath.
+- v2.1.0 adds positional audio: createBus(name,{spatial:'positional'}) builds a PannerNode per voice and setPosition(handle,x,y,z) writes 3D position on the cold ~10 Hz monitor (zero-alloc scratch stamp on the caller frame, fail-closed on a stolen handle). Default stays 'stereo', byte-identical; the hot play() gains no new branch.
 - Mix automation lives on a per-bus sidechain gain (gain -> duckGain -> master) so ducking and snapshot morphs compose with volume/mute instead of fighting for one AudioParam. Meters / duck follower / auto-suspend share one cold ~10 Hz monitor that never touches play()/stop().
 
 ## Quick Start
@@ -80,6 +82,7 @@ play(soundId, volume?, pan?, pitch?): positional hot path, returns handle >= 0 o
 playOpts(soundId, opts?): sugar with pitchVar resolution.
 stop(handle): stops a specific play. The handle carries its bus, so stop() resolves the owning pool in O(1) and can never reach across a bus boundary.
 isPlaying(handle): boolean. busOf(handle): string|null. activeCount(busName?): live SFX voices per bus or engine-wide.
+setPosition(handle, x, y, z): set a positional voice's 3D position. Takes the SAME handle play() returned. Caller-frame safe (call every frame): does NO param write -- it only stamps a preallocated scratch buffer + a dirty bit, zero allocation. The positionX/Y/Z writes ride the shared ~10 Hz monitor (throttled, 0.02 s time constant), so per-frame calls collapse to ~10 native param events/second per axis (the SP-03 bound). Fail-closed: a stereo-bus handle, an out-of-range channel, or a stolen/dead/bogus voice is a silent no-op (steal-safety resolves at flush via a generation-checked voiceNode, so a stolen channel never gets the stale position). Requires a bus built with {spatial:'positional'}.
 stopBus(name, opts?), stopAll(opts?): bus- and engine-wide stops. Both stop SFX voices AND fade out any music track routed to those buses (opts.fade, default 200ms).
 loadState(id): ReadSignal<'idle'|'loading'|'ready'|'error'>.
 
@@ -109,7 +112,7 @@ stopDuck(bus, {release}): restore to rest over the release TC, clearing the manu
 duckOn(triggerBus, targetBus, {threshold=1, level=0.3, attack, release}): automatic follower - while triggerBus has >= threshold voices, dip targetBus. Off the hot path, edge-only. Explicit duck() wins. Attack/release asymmetric by default.
 captureSnapshot(name): record every bus's volume + mute (not track volumes).
 applySnapshot(name, ms): morph to it over ms. Signals truthful immediately; audible transition rides the sidechain, continuous from the actual current level (click-free mid-morph / mid-duck). ms=0 snaps.
-createBus(name, {meter}): create a bus after init(). Idempotent, rejects 'master', fails closed (RangeError) at the 2^21 ceiling at runtime. {meter:true} taps an AnalyserNode.
+createBus(name, {meter, spatial}): create a bus after init(). Idempotent, rejects 'master', fails closed (RangeError) at the 2^21 ceiling at runtime. {meter:true} taps an AnalyserNode. {spatial:'positional'} builds a PannerNode per voice (default 'stereo' = StereoPanner equalpower, byte-identical to prior releases) and enables setPosition(); an unknown spatial value fails closed with a did-you-mean. Spatial mode is decided here at construction and captured into the pool's panner option -- the hot play() never re-tests it.
 level(bus): ReadSignal<number> RMS at ~10 Hz, or null on an unmetered/unknown bus. One pre-allocated Float32Array per metered bus, zero alloc per read.
 enableAutoSuspend({after=30}): suspend the context after N silent seconds; a later play() wakes it (bare resume(), native scheduler holds the voice). Returns false and stays off on iOS (un-unlock hazard). disableAutoSuspend(), isAutoSuspended().
 
@@ -135,7 +138,7 @@ Import path: `@zakkster/lite-audio/compat`. Exports `AudioManager` (class) and `
 `masterNode() : GainNode | null`
 
 ### destroy(): void
-Stops every voice, tears down SFX pools, tears down every track (pauses element, disconnects source + gains, removes timeupdate/ended listeners, cancels pending pause timers), disposes signal effects, aborts unlock/lifecycle controllers, releases references. Idempotent. Does not close the AudioContext.
+Stops every voice, tears down SFX pools, tears down every track (pauses element, disconnects source + gains, removes timeupdate/ended listeners, cancels pending pause timers), disposes every lite-signal node it created (effects AND signals -- per-bus volume/mute, metered level, instance mute/unlock/context-state, per-sound and per-track readouts), releases the per-bus positional scratch, aborts unlock/lifecycle controllers, releases references. Idempotent, so a host that churns engines (route changes, tests, hot reload) returns all pool nodes and never exhausts the shared lite-signal pool. Does not close the AudioContext.
 
 ## Handle contract
 
@@ -143,18 +146,18 @@ A `play()` / `playOpts()` / `playUnique()` result is ONE number carrying four ki
 
 | Value                       | Meaning                                   | Inert to stop()? |
 | --------------------------- | ----------------------------------------- | ---------------- |
-| `0`                         | a REAL handle: bus 0, channel 0, gen 0    | no — it stops    |
-| `busIndex * 2^32 + pool`    | every other real handle                   | no — it stops    |
+| `0`                         | a REAL handle: bus 0, channel 0, gen 0    | no -- it stops    |
+| `busIndex * 2^32 + pool`    | every other real handle                   | no -- it stops    |
 | `-1` (Skipped)              | nothing played (unknown/not-ready sound, locked context queued the play, or playUnique throttled) | yes |
 | `-2` (TrackStarted)         | playUnique() started a music TRACK (singleton, name-addressed, no handle) | yes |
 
 - **0 cannot be a null sentinel.** It is a perfectly good handle, so "nothing happened" is signalled by NEGATIVES only. Negatives are inert to `stop()` by construction (`if (handle < 0) return`), so a `play()`/`playUnique()` result is safe to pass straight to `stop()` unchecked.
 - **Two bit layouts.** The pool handle is `[gen:24][channel:8]` (a uint32, `((gen << 8) | channel) >>> 0`). The engine tags the bus ABOVE those 32 bits: `handle = busIndex * 2^32 + poolHandle`. Decode: `busIndex = (h / 2^32) | 0`, `poolHandle = h >>> 0`. This is why raw pool handles collide across buses (every pool starts at gen 0 / channel 0) and the bus tag is what names one voice.
 - **Bus ceiling: 2^21.** The low half is a full uint32, so a handle is an exact integer only while `busIndex <= 2^21 - 1`; bus index 2^21 itself already overflows 2^53. `init()` throws a `RangeError` above 2^21 user buses rather than issue colliding handles. `'master'` is implicit and does not count.
-- **SMI note.** A handle leaves V8's SMI range (31-bit signed) on any bus >= 1, and on bus 0 once a channel's generation passes 8,388,608 (~hours of continuous stealing on one channel). It stays a plain number exact to 2^53; the boxed-double cost is below the zero-GC gate's resolution — measured, see `decisions/0001-handle-namespace.md` and `test/torture.mjs`. Generation WRAPS at 2^24 rather than retiring the channel (voices are scarce and fixed); the divergence from lite-arena's fail-closed retirement is deliberate — see `decisions/0002-generation-wrap.md`.
+- **SMI note.** A handle leaves V8's SMI range (31-bit signed) on any bus >= 1, and on bus 0 once a channel's generation passes 8,388,608 (~hours of continuous stealing on one channel). It stays a plain number exact to 2^53; the boxed-double cost is below the zero-GC gate's resolution -- measured, see `decisions/0001-handle-namespace.md` and `test/torture.mjs`. Generation WRAPS at 2^24 rather than retiring the channel (voices are scarce and fixed); the divergence from lite-arena's fail-closed retirement is deliberate -- see `decisions/0002-generation-wrap.md`.
 
 ## Zero-GC gate
 
-`node --expose-gc test/torture.mjs` — measures the handle return on bus >= 1 and past generation 8,388,608 (the cases where it leaves SMI range), reports bytesPerOp per regime, and is falsifiable: `LITEAUDIO_TORTURE_LEAK=1 node --expose-gc test/torture.mjs` routes the gated path through the rejected `{bus,handle}`-object design and the gate exits non-zero.
+`node --expose-gc test/torture.mjs` -- measures the handle return on bus >= 1 and past generation 8,388,608 (the cases where it leaves SMI range), reports bytesPerOp per regime, and is falsifiable: `LITEAUDIO_TORTURE_LEAK=1 node --expose-gc test/torture.mjs` routes the gated path through the rejected `{bus,handle}`-object design and the gate exits non-zero. The gate also runs the AU1 monitor-tick tier and the S3 spatial tiers -- T-SP1 (setPosition is a zero-alloc scratch stamp), T-SP2 (the ~10 Hz flush holds the native param-event rate under a 200/param/voice cap), and T-SP3 (a lite-leak retention witness proving destroy() releases the per-bus positional scratch across 200 build/teardown cycles). Each ships a proven red control: LITEAUDIO_TORTURE_SP1_RED / SP2_RED / SP3_RED each force the failure that tier guards against, and the gate exits non-zero. `npm run verify` runs the node:test suite and this gate together.
 
 See Audio.js source for full inline documentation.

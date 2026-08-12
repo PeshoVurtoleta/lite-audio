@@ -4,6 +4,12 @@ import { signal, effect, batch, dispose } from '@zakkster/lite-signal';
 import { AudioPool } from '@zakkster/lite-audio-pool';
 
 /**
+ * Package version, kept in lockstep with package.json (the /release gate syncs
+ * the two). A cold module-level constant -- read at import, never on a hot path.
+ */
+export const VERSION = '2.1.0';
+
+/**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
  * from the manager to lite-audio does not lose the player's saved mute
  * preference. Do not rename without a migration path.
@@ -19,6 +25,18 @@ const MUTED_STORAGE_KEY = 'lite_audio_muted';
  */
 const FADE_SECONDS = 0.02;
 const RAMP_TC = 0.01;
+
+/**
+ * Position write time constant (S3). setPosition() only stamps a scratch buffer
+ * and a dirty bit; the actual positionX/Y/Z writes happen COLD on the shared
+ * ~10 Hz monitor (see _flushPositions), throttled to the monitor cadence. A
+ * 20 ms setTargetAtTime smooths the ~100 ms steps between flushes into a glide,
+ * so a source moving at frame rate never clicks even though its param is only
+ * touched ~10 times a second. Per-frame per-voice param writes are forbidden
+ * (SP-03): they grow the native automation-event list unbounded, invisible to
+ * the JS-heap gate. The throttle is the SP-03 bound.
+ */
+const POS_TC = 0.02;
 
 /**
  * Ducking time constants (D-A3). A duck is a sidechain compressor's key path:
@@ -416,9 +434,26 @@ export class LiteAudio {
      * @param {string} name
      * @param {Object} [opts]
      * @param {boolean} [opts.meter] - tap an AnalyserNode for level() readouts.
+     * @param {'stereo'|'positional'} [opts.spatial] - per-voice pan mode. Decided
+     *   here at CONSTRUCTION (cold) and captured into the pool's `panner` option;
+     *   play() never re-tests it. Defaults to 'stereo' (byte-identical to prior
+     *   releases: a StereoPanner per voice, equalpower). 'positional' builds a
+     *   PannerNode per voice and enables setPosition(). An unknown value is a
+     *   wiring error and fails closed with a did-you-mean, never a silent ignore.
      * @returns {Object} the bus record.
      */
     _buildBus(name, opts = {}) {
+        // Spatial mode is validated and frozen at bus construction. Fail closed:
+        // an unknown value throws with a hint rather than silently degrading to
+        // stereo, so a typo surfaces at createBus() and not as silent flat audio.
+        const spatial = opts.spatial ?? 'stereo';
+        if (spatial !== 'stereo' && spatial !== 'positional') {
+            throw new RangeError(
+                'LiteAudio: createBus("' + name + '") got unknown spatial "' + spatial +
+                '" -- expected "stereo" or "positional".'
+            );
+        }
+
         const gain = this._ctx.createGain();
         const duckGain = this._ctx.createGain();
         duckGain.gain.value = DUCK_REST;
@@ -450,10 +485,26 @@ export class LiteAudio {
             analyser: null,
             meterBuffer: null,
             level: null,
+            // Spatial mode + position scratch (S3). `spatial` is captured into the
+            // pool's `panner` option at build time. The three arrays stay null on a
+            // stereo bus (it allocates nothing new -- default stays byte-identical);
+            // they are allocated at pool build only when spatial==='positional':
+            //   posXYZ   Float32Array(cap*3) - the pending x,y,z per channel
+            //   posOwner Uint32Array(cap)    - the full gen+channel handle that
+            //                                  stamped each slot (steal-safety key)
+            //   posDirty Uint32Array bitset  - which channels need a flush
+            spatial,
+            posXYZ: null,
+            posOwner: null,
+            posDirty: null,
         };
         this._buses.set(name, busRec);
         this._busList.push(busRec);
         if (opts.meter) this._attachMeter(busRec);
+        // A positional bus writes position on the shared monitor tick, so it must
+        // ensure the monitor is armed even if no meter/duck/auto-suspend did.
+        // _startMonitor() is idempotent-guarded, so this is a no-op if already up.
+        if (spatial === 'positional') this._startMonitor();
         return busRec;
     }
 
@@ -589,9 +640,27 @@ export class LiteAudio {
             // per-play buffer, which is why we asked the pool to grow that arg
             // in v1.1.0. spriteMap only needs to name what CAN be played.
             const dummyBuffer = ids.length > 0 ? this._sounds.get(ids[0]).buffer : null;
+            // Spatial mode is captured HERE, at pool construction (cold), so the
+            // hot play() never re-tests it: a stereo bus builds StereoPanner voices
+            // (byte-identical to prior releases), a positional bus builds PannerNode
+            // voices. On a rebuild we reuse the existing scratch arrays and zero
+            // them; the pool destroy() above already tore down the old voices.
             busRec.pool = new AudioPool(
-                this._ctx, dummyBuffer, spriteMap, this._poolCapacity, busRec.gain
+                this._ctx, dummyBuffer, spriteMap, this._poolCapacity, busRec.gain,
+                { panner: busRec.spatial }
             );
+            if (busRec.spatial === 'positional') {
+                const cap = this._poolCapacity;
+                if (busRec.posXYZ === null) {
+                    busRec.posXYZ = new Float32Array(cap * 3);
+                    busRec.posOwner = new Uint32Array(cap);
+                    busRec.posDirty = new Uint32Array((cap + 31) >>> 5);
+                } else {
+                    busRec.posXYZ.fill(0);
+                    busRec.posOwner.fill(0);
+                    busRec.posDirty.fill(0);
+                }
+            }
         }
 
         // Flush the queue in case sounds arrived after the user gesture:
@@ -697,6 +766,47 @@ export class LiteAudio {
         const busRec = this._busList[(handle / BUS_STRIDE) | 0];
         if (!busRec || !busRec.pool) return false;
         return busRec.pool.isPlaying(handle >>> 0);
+    }
+
+    /**
+     * Set the 3D position of a positional voice (S3). Takes the SAME handle
+     * play() returned (frozen codec: bus tag in the high half, pool handle in
+     * the low half). This is a caller-frame method safe to call every frame: it
+     * does NO param write. It only stamps a preallocated scratch buffer with the
+     * three floats and sets a dirty bit; the actual positionX/Y/Z writes ride
+     * the cold ~10 Hz monitor (_flushPositions) throttled at POS_TC. Zero
+     * allocation, zero param events on this path -- that is the SP-03 bound.
+     *
+     * Fail closed at every step: a non-integer or negative handle, a handle
+     * whose bus is stereo (no scratch), or a channel past capacity is a silent
+     * no-op. Steal-safety is resolved LATER, at flush: posOwner stores the full
+     * gen+channel handle, so a channel stolen after this call resolves to a null
+     * voiceNode on flush and the stale position is never stamped onto the new
+     * voice. See decisions and SPATIAL_ROADMAP S3.
+     * @param {number} handle - a voice handle from play() on a positional bus
+     * @param {number} x
+     * @param {number} y
+     * @param {number} z
+     * @returns {void}
+     */
+    setPosition(handle, x, y, z) {
+        if (this._destroyed) return;
+        if (!Number.isInteger(handle) || handle < 0) return;
+        const busRec = this._busList[(handle / BUS_STRIDE) | 0];
+        if (!busRec) return;
+        const dirty = busRec.posDirty;
+        if (dirty === null) return;                 // stereo bus / no scratch
+        const poolHandle = handle >>> 0;
+        const ch = poolHandle & 0xFF;               // channel = low 8 bits (cap <= 256)
+        const owner = busRec.posOwner;
+        if (ch >= owner.length) return;             // bounds-check before touching scratch
+        const i3 = ch * 3;
+        const xyz = busRec.posXYZ;
+        xyz[i3] = x;
+        xyz[i3 + 1] = y;
+        xyz[i3 + 2] = z;
+        owner[ch] = poolHandle;                     // full gen+channel: the steal key
+        dirty[ch >>> 5] |= (1 << (ch & 31));
     }
 
     /**
@@ -1531,6 +1641,7 @@ export class LiteAudio {
                 if (this._destroyed) return;
                 this._evalDuckRules();
                 this._sweepMeters();
+                this._flushPositions();
                 this._evalAutoSuspend();
                 this._monitorTimer = this._setTimeout(this._monitorTick, MONITOR_INTERVAL_MS);
             };
@@ -1581,6 +1692,50 @@ export class LiteAudio {
             let sumSq = 0;
             for (let j = 0; j < buf.length; j++) { const s = buf[j]; sumSq += s * s; }
             busRec.level.set(Math.sqrt(sumSq / buf.length));
+        }
+    }
+
+    /**
+     * Flush pending positions on the cold ~10 Hz monitor (S3). This is the ONLY
+     * place positionX/Y/Z are written, throttled to the monitor cadence: a caller
+     * that calls setPosition() every frame (60 Hz) still produces at most one
+     * write per axis per tick (~10 Hz), which is the SP-03 native-event bound
+     * (counted PER PARAM, not summed across axes -- ~100 events/param over 10 s).
+     *
+     * Steal-safety: posOwner holds the full gen+channel handle that stamped each
+     * slot. voiceNode() is generation-checked and fail-closed, so a channel
+     * stolen since setPosition() resolves to null here -- the bit is cleared and
+     * the stale position is never written onto the new occupant. Allocation-free:
+     * indexed word scan, no iterators, no per-voice objects.
+     */
+    _flushPositions() {
+        const list = this._busList;
+        const now = this._ctx.currentTime;
+        for (let b = 0; b < list.length; b++) {
+            const busRec = list[b];
+            const dirty = busRec.posDirty;
+            if (dirty === null) continue;           // stereo bus: nothing to flush
+            const pool = busRec.pool;
+            if (pool === null) continue;
+            const xyz = busRec.posXYZ;
+            const owner = busRec.posOwner;
+            for (let w = 0; w < dirty.length; w++) {
+                let bits = dirty[w];
+                if (bits === 0) continue;
+                const base = w << 5;
+                while (bits !== 0) {
+                    const low = bits & -bits;                  // lowest set bit
+                    const ch = base + (31 - Math.clz32(low));  // its channel index
+                    bits ^= low;
+                    const node = pool.voiceNode(owner[ch]);
+                    if (node === null) continue;               // stolen/dead: skip
+                    const i3 = ch * 3;
+                    node.positionX.setTargetAtTime(xyz[i3], now, POS_TC);
+                    node.positionY.setTargetAtTime(xyz[i3 + 1], now, POS_TC);
+                    node.positionZ.setTargetAtTime(xyz[i3 + 2], now, POS_TC);
+                }
+                dirty[w] = 0;                        // every bit in this word handled
+            }
         }
     }
 
@@ -1718,6 +1873,11 @@ export class LiteAudio {
         // stopAll first so voice fade-outs schedule against a still-live graph.
         for (const [, busRec] of this._buses) {
             if (busRec.pool) { try { busRec.pool.destroy(); } catch {} busRec.pool = null; }
+            // Release the positional scratch (S3). Null, not zero: a torn-down bus
+            // has no voices, so a stray setPosition after destroy must no-op.
+            busRec.posXYZ = null;
+            busRec.posOwner = null;
+            busRec.posDirty = null;
         }
 
         // Tear down every track: cancel pending pause, remove element handlers,
@@ -1749,11 +1909,36 @@ export class LiteAudio {
         }
         this._effectHandles.length = 0;
 
-        // Disconnect bus, sidechain, analyser and master gains.
+        // Dispose every SIGNAL too, not just the effects above. Signals are
+        // pool-backed nodes in lite-signal exactly like effects; disposing only
+        // the effects returned ~a third of the nodes and leaked the rest, so a
+        // build/teardown-churned host (SPA route changes, a test suite, hot
+        // reload) slowly exhausted the shared node pool. Disposed AFTER the
+        // effects, so no live effect can read a signal mid-teardown. dispose() is
+        // idempotent and foreign-safe, hence the blanket try/catch.
+        try { dispose(this._sMuted); } catch {}
+        try { dispose(this._sUnlocked); } catch {}
+        try { dispose(this._sCtxState); } catch {}
+        for (const [, rec] of this._sounds) {
+            try { dispose(rec.loadState); } catch {}
+        }
+        for (const [, rec] of this._tracks) {
+            try { dispose(rec.loadState); } catch {}
+            try { dispose(rec.playing); } catch {}
+            try { dispose(rec.position); } catch {}
+            try { dispose(rec.duration); } catch {}
+        }
+
+        // Disconnect bus, sidechain, analyser and master gains -- and dispose the
+        // per-bus signals (volume, mute, and the metered level readout) on the
+        // same pass.
         for (const [, busRec] of this._buses) {
             try { busRec.gain.disconnect(); } catch {}
             try { busRec.duckGain?.disconnect(); } catch {}
             try { busRec.analyser?.disconnect(); } catch {}
+            try { dispose(busRec.volume); } catch {}
+            try { dispose(busRec.muted); } catch {}
+            if (busRec.level) { try { dispose(busRec.level); } catch {} }
         }
         try { this._master?.disconnect(); } catch {}
 

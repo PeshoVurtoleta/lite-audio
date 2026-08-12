@@ -65,6 +65,29 @@ export function mockPanner() {
 }
 
 /**
+ * PannerNode stand-in for positional mode (S3). The pool builds one per voice in
+ * 'positional' mode and writes panningModel/distanceModel/refDistance/maxDistance/
+ * rolloffFactor at construction, so those are plain writable properties here. The
+ * position is three AudioParams -- positionX/Y/Z -- each a mockParam whose .events
+ * array records every setTargetAtTime, so the torture harness can count param
+ * events PER AXIS (the SP-03 native-automation bound is invisible to the heap gate,
+ * so it is proven against this counter instead). The pool fails closed if
+ * positionX is undefined, so these must be present as real params.
+ */
+export function mockPanner3D() {
+    const n = baseNode('panner3d');
+    n.panningModel = 'equalpower';
+    n.distanceModel = 'inverse';
+    n.refDistance = 1;
+    n.maxDistance = 10000;
+    n.rolloffFactor = 1;
+    n.positionX = mockParam(0);
+    n.positionY = mockParam(0);
+    n.positionZ = mockParam(0);
+    return n;
+}
+
+/**
  * AnalyserNode stand-in for the meter path. getFloatTimeDomainData fills the
  * caller's array with a constant `_fill` (default 0 = silence), so a test can
  * drive a known RMS: the RMS of a constant c is |c|, so `_fill = 0.5` yields a
@@ -214,6 +237,7 @@ export function createMockContext({ sampleRate = 44100, state = 'suspended' } = 
 
         createGain: () => mockGain(),
         createStereoPanner: () => mockPanner(),
+        createPanner: () => mockPanner3D(),
         createBufferSource: () => mockBufferSource(),
         createBuffer: (ch, len, sr) => mockAudioBuffer(ch, len, sr),
         createMediaElementSource: (el) => mockMediaElementSource(el),

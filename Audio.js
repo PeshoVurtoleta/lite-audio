@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.5.0';
+export const VERSION = '2.5.1';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -200,6 +200,15 @@ const BUS_STRIDE = 4294967296;   // 2^32
 const MAX_BUSES = 2097152;       // 2^21
 
 /**
+ * A pool channel packs into the low 8 bits of a handle (`poolHandle & 0xFF`,
+ * decision 0001), so a pool can address at most 256 channels. A poolCapacity of
+ * 257 would wrap channel 256 onto channel 0 and silently overwrite channel 0's
+ * scratch. We fail closed at construction (see the poolCapacity guard) rather
+ * than corrupt the mix. This is a cold check (init only).
+ */
+const MAX_POOL_CAPACITY = 256;   // low 8 bits of a handle: poolHandle & 0xFF
+
+/**
  * playUnique() returns a handle for a sound. Tracks have no handle - they are
  * singletons addressed by name - so it needs a way to say "the track started"
  * that is not a number stop() would act on. It cannot be 0: that is a perfectly
@@ -385,6 +394,20 @@ export class LiteAudio {
     constructor(opts = {}) {
         this._busNames = opts.buses || ['sfx', 'ui', 'voice', 'music'];
         this._poolCapacity = opts.poolCapacity ?? 32;
+        // Fail closed on an out-of-range poolCapacity. A pool channel packs into
+        // the low 8 bits of a handle (poolHandle & 0xFF, decision 0001), so a
+        // capacity past 256 wraps channel 256 onto channel 0 and silently
+        // overwrites channel 0's scratch. Number.isInteger rejects NaN and
+        // non-integers (null is not zero) before the range test.
+        if (!Number.isInteger(this._poolCapacity) || this._poolCapacity < 1 || this._poolCapacity > MAX_POOL_CAPACITY) {
+            throw new RangeError(
+                'LiteAudio: poolCapacity ' + this._poolCapacity + ' exceeds the channel ceiling of ' +
+                MAX_POOL_CAPACITY + '. A pool channel packs into the low 8 bits of a handle ' +
+                '(poolHandle & 0xFF), so a capacity past 256 would wrap channel 256 onto ' +
+                'channel 0 and silently overwrite channel 0\'s scratch. poolCapacity must be ' +
+                'an integer in the range 1..256.'
+            );
+        }
         this._queueLimit = opts.queueLimit ?? DEFAULT_QUEUE_LIMIT;
         this._mutedKey = opts.mutedStorageKey ?? MUTED_STORAGE_KEY;
         // Bind the default: the browser's fetch throws "Illegal invocation" if
@@ -1128,6 +1151,10 @@ export class LiteAudio {
      * or -1 on any skip (unknown sound, not-ready sound, context locked).
      * When locked, the call is enqueued (bounded, latest-per-sound) instead
      * of dropped - the queue is flushed on unlock.
+     *
+     * A play() racing a defineSounds() pool rebuild sees pool === null and
+     * returns -1 (fail closed). This is a brief dropped-play window for
+     * concurrent loaders: a drop is safe, a play onto a torn-down pool is not.
      */
     play(soundId, volume = 1, pan = 0, pitch = 1) {
         if (this._destroyed) return -1;
@@ -1210,6 +1237,10 @@ export class LiteAudio {
      * three floats and sets a dirty bit; the actual positionX/Y/Z writes ride
      * the cold ~10 Hz monitor (_flushPositions) throttled at POS_TC. Zero
      * allocation, zero param events on this path -- that is the SP-03 bound.
+     *
+     * Works on discrete-surround buses too, not only spatial:'positional' voices:
+     * a discrete bus shares the same positional scratch, so setPosition() stamps
+     * it identically and the discrete lane solver reads the same three floats.
      *
      * Fail closed at every step: a non-integer or negative handle, a handle
      * whose bus is stereo (no scratch), or a channel past capacity is a silent
@@ -2001,7 +2032,12 @@ export class LiteAudio {
      * (busGain x duckGain) read before anything changes, so a snapshot applied
      * mid-ramp - or mid-duck - picks up from where the sound actually is, with
      * no click. Applying a snapshot restates the mix, so it clears any manual
-     * duck latch on the buses it touches.
+     * duck latch on the buses it touches and resets their sidechain to rest.
+     * An active duckOn rule re-asserts only on the next trigger EDGE, not the
+     * next tick: _evalDuckRules is edge-gated (it writes only when shouldDuck
+     * crosses rule.active), so a trigger STILL above its threshold does NOT
+     * immediately re-duck a bus the snapshot just un-ducked -- it re-ducks only
+     * when the trigger next crosses the threshold.
      *
      * A bus whose target is silence (muted or zero) is left to the volume/mute
      * signals' own click-free settle rather than a sidechain fade, so duckGain

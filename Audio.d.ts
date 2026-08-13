@@ -164,7 +164,13 @@ export interface LiteAudioOptions {
      */
     buses?: string[];
 
-    /** Voices per bus pool (SFX). Defaults to 32. */
+    /**
+     * Voices per bus pool (SFX). Defaults to 32. Must be an integer in the
+     * range 1..256: a pool channel packs into the low 8 bits of a handle
+     * (poolHandle & 0xFF), so a capacity past 256 would wrap channel 256 onto
+     * channel 0. The constructor throws a RangeError on a non-integer, < 1, or
+     * > 256 value (fail closed).
+     */
     poolCapacity?: number;
 
     /**

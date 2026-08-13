@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.5.1
+
+Consolidation release closing the spatial suite (session S8). One line of new
+runtime behavior -- a construct-time fail-closed guard on `poolCapacity` -- plus
+three doc-only JSDoc clarifications and a docs/version pass. NO hot-path or
+behavior change to `play()`, `setPosition()`, `stop()`, `_flushLanes()`, or the
+~10 Hz monitor tick; both `HashParity` goldens (`play()`, `stop()`) are frozen.
+
+### FAIL-CLOSED HARDENING
+
+- `new LiteAudio({ poolCapacity })` now throws a `RangeError` at construction on
+  a non-integer, `< 1`, or `> 256` capacity. A pool channel packs into the low 8
+  bits of a handle (`poolHandle & 0xFF`, decision 0001), so a capacity past 256
+  would wrap channel 256 onto channel 0 and silently overwrite channel 0's
+  scratch. A caller previously passing `> 256` was ALREADY corrupting channel 0
+  via that wrap; the throw surfaces a latent bug rather than flipping otherwise
+  correct behavior. `Number.isInteger` rejects `NaN` and non-integers before the
+  range test (null is not zero). New `const MAX_POOL_CAPACITY = 256`.
+
+### Docs
+
+- `setPosition()` JSDoc: documents that it works on discrete-surround buses too,
+  not only `spatial: 'positional'` voices -- they share the positional scratch.
+- `applySnapshot()` JSDoc: documents that applying a snapshot clears the manual
+  duck latch and resets the sidechain to rest, and that an active `duckOn` rule
+  re-asserts only on the next trigger EDGE (not the next tick) -- the duck
+  evaluator is edge-gated, so a trigger still above threshold will not
+  immediately re-duck a bus the snapshot just un-ducked.
+- `play()` JSDoc: documents that a `play()` racing a `defineSounds()` pool
+  rebuild sees `pool === null` and returns `-1` (fail closed -- a brief
+  dropped-play window for concurrent loaders).
+- README brought onto the LiteSepforge blueprint spine for spatial; all
+  pre-existing non-ASCII glyphs across source and docs transliterated to ASCII
+  (`->`, `<=`, `x`, "degrees"; only U+00D7 and U+00B5 remain).
+- `Audio.d.ts`: `poolCapacity` documents the 1..256 range and the construct-time
+  throw.
+
+New `test/Capacity.test.js` (8 cases) pins the guard: 256 / 1 / default
+construct; 257 / 0 / -1 / 1.5 / NaN throw a `RangeError` naming 256.
+
 ## 2.5.0
 
 The 5+1 (6-channel) and 3+1 (4-channel) reductions of the S6 discrete-surround

@@ -11,6 +11,35 @@
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 [![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](./LICENSE)
 
+> Zero-GC reactive Web Audio engine. Signal-driven buses, ABA-safe voice handles, an unlock queue, one AudioPool per bus, streaming music with equal-power crossfade, mix intelligence (ducking, snapshots, meters), and a full spatial suite -- positional, HRTF, a mono-safe Haas widener, and discrete 7+1 / 5+1 / 3+1 surround with fail-closed output-layout detection. Built for games and long-running interactive tools where a garbage-collector pause is a dropped frame.
+
+## The spatial audio engine the ecosystem was missing
+
+Every browser since 2018 ships the whole Web Audio surface -- PannerNodes, HRTF
+convolution, multichannel destinations -- yet the popular wrappers still treat
+audio as fire-and-forget events over a decoder shim. lite-audio wires that
+platform directly: continuous state (bus volumes, mute, load status, context
+state, 3D position) lives in a `lite-signal` reactive graph; one-shot triggers
+stay imperative; and every per-frame path -- `play()`, `setPosition()`,
+`setWidth()`, `stop()` -- allocates zero bytes, proven by a red-controlled
+torture gate. No Howler, no HTML5 Audio fallback, no MP3 shim.
+
+```bash
+npm i @zakkster/lite-audio @zakkster/lite-signal @zakkster/lite-audio-pool
+```
+
+```js
+import { LiteAudio } from '@zakkster/lite-audio';
+
+const audio = new LiteAudio({ buses: ['sfx'] });
+await audio.init();
+
+audio.createBus('world', { spatial: 'positional' });  // PannerNode per voice
+await audio.defineSounds({ step: { src: ['/step.wav'], bus: 'world' } });
+
+const h = audio.play('step', 1, 0, 1);                // zero-alloc hot path
+audio.setPosition(h, 3, 0, -2);                       // caller-frame safe every frame
+```
 
 Zero-GC reactive Web Audio engine. Signal-driven buses, ABA-safe voice handles,
 unlock queue, one `AudioPool` per bus. The SFX layer of a growing audio stack
@@ -28,7 +57,61 @@ that eventually deprecates the Howler wrapper it replaces.
 (`MediaElementAudioSourceNode`, crossfades, exclusive/unique); v1.2.0 added mix
 intelligence -- ducking, snapshots, auto-suspend, per-bus meters, dynamic buses;
 **v2.0.0 ships the `./compat` drop-in** for `lite-audio-manager` with full parity
-certification. Migrate off the Howler overlay by changing one import.
+certification. Migrate off the Howler overlay by changing one import. The spatial
+suite lands across v2.1.0 (positional) -> v2.2.0 (HRTF) -> v2.3.0 (Haas width) ->
+v2.4.0 (7+1 discrete + layout detection) -> v2.5.0 (5+1 / 3+1 subsets).
+
+## Table of contents
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Why this exists](#why-this-exists)
+- [What you get](#what-you-get)
+- [Handles](#handles)
+- [Why not Howler?](#why-not-howler)
+- [Architecture in one paragraph](#architecture-in-one-paragraph)
+- [Music layer](#music-layer)
+- [Mix intelligence](#mix-intelligence-v120)
+- [Spatial buses: positional and HRTF](#spatial-buses-positional-and-hrtf)
+- [Stereo width (the Haas widener)](#stereo-width-the-haas-widener)
+- [Discrete surround](#discrete-surround-71--51--31-and-output-layout-detection-v240-subsets-v250)
+- [Signal readouts](#signal-readouts-the-whole-reactive-surface)
+- [Composability](#composability)
+- [Options reference](#options-reference)
+- [Constants](#constants)
+- [Migration from lite-audio-manager](#migration-from-lite-audio-manager)
+- [Testing](#testing)
+- [Zero-GC design notes](#zero-gc-design-notes)
+- [Design decisions worth knowing](#design-decisions-worth-knowing)
+- [What this is not](#what-this-is-not)
+- [Ecosystem](#ecosystem)
+- [License](#license)
+
+## Why this exists
+
+Voice-stealing is the norm in a game, continuous mix state does not belong in an
+event bag, and a garbage-collector pause during a firefight is a dropped frame.
+lite-audio answers all three: bus-tagged generation-stamped handles make a stale
+`stop()` a silent no-op instead of a wrong-voice hit; a `lite-signal` reactive
+graph carries every continuous control value; and every per-frame path allocates
+zero bytes, held to that budget by a falsifiable torture gate. It is the audio
+engine for the slice of the web that has moved on from the decoder-shim era.
+
+## What you get
+
+- **SFX** through one `AudioPool` per bus, fired by a zero-alloc
+  `play(id, vol, pan, pitch)` hot path returning a bus-tagged ABA-safe handle.
+- **Music** streamed via `MediaElementAudioSourceNode`, name-addressed, with
+  equal-power crossfade, exclusive/unique playback, and custom loop points.
+- **Mix intelligence** -- ducking (separate attack/release), morphing snapshots,
+  per-bus RMS meters, dynamic buses, iOS-safe auto-suspend -- all on a sidechain
+  gain so nothing fights the volume/mute automation for one param.
+- **Spatial** -- `positional` PannerNodes, `hrtf` binaural convolution, a
+  mono-safe `width` Haas widener, and `discrete` 7+1 / 5+1 / 3+1 VBAP surround
+  with fail-closed output-layout detection -- all driven by one `setPosition()`.
+- **iOS/mobile unlock** ported verbatim from `lite-audio-manager`, plus a bounded
+  pre-unlock play queue the Howler-based manager could not offer.
+- **A `./compat` drop-in** so a `lite-audio-manager` app migrates by one import.
 
 ## Install
 
@@ -130,6 +213,55 @@ to pass straight to `stop()` without a guard.
   The generation counter **wraps** at `2^24` rather than retiring the channel, a
   deliberate divergence from lite-arena documented in
   [`decisions/0002`](decisions/0002-generation-wrap.md).
+
+<details>
+<summary>Deep dive: how a voice handle is built and resolved.</summary>
+
+A handle is a single `number` carrying three coordinates -- which bus, which
+channel, which generation -- so `stop()` can name exactly one voice with no map
+lookup on the caller frame and no chance of a cross-bus hit.
+
+**Packing.** Each bus runs its own `AudioPool`. The pool packs a channel and a
+generation counter into a `uint32`:
+
+```
+poolHandle = ((gen << 8) | channel) >>> 0     // [gen:24][channel:8]
+```
+
+The engine then tags that with the bus index in the high half:
+
+```
+handle = busIndex * 2^32 + poolHandle          // [busIndex:*][gen:24][channel:8]
+```
+
+**Resolving.** `stop(handle)` / `isPlaying(handle)` decode without allocating:
+
+```
+busIndex   = (handle / 2^32) | 0
+poolHandle = handle >>> 0
+```
+
+`busIndex` selects the pool in O(1); the pool checks the `gen` in the low half
+against the channel's live generation.
+
+**Steal-safety.** When a channel is stolen (a new voice reuses it), the pool
+bumps that channel's generation. An old handle still names the same channel but
+carries the stale `gen`, so the pool's generation check fails and `stop()` on it
+is a silent no-op instead of cutting the new voice. The generation counter is a
+recycle stamp, not a namespace -- which is exactly why the bus tag is needed: it
+is what stops an `sfx` channel-0 handle from reaching `ui`/`voice`/`music`
+channel 0, since every pool independently starts at channel 0 / gen 0.
+
+**The two ceilings.** The `channel` field is the low 8 bits, so a pool addresses
+at most **256 channels** -- `poolCapacity` is guarded to `1..256` at
+construction (a `257` would wrap channel `256` onto channel `0` and overwrite its
+scratch). The bus tag lives above `2^32`, and a handle is an exact integer only
+while `busIndex <= 2^21 - 1`, so `MAX_BUSES` is `2^21`. Both are fail-closed
+throws, never silent wraps. Full rationale in
+[`decisions/0001`](decisions/0001-handle-namespace.md) and
+[`decisions/0002`](decisions/0002-generation-wrap.md).
+
+</details>
 
 ## Why not Howler?
 
@@ -287,6 +419,19 @@ per-voice HRTF convolution CPU -- and an `'hrtf'` bus fires one silent `gain=0`
 before the first real play does, eating the first-play hitch. lite-audio never
 sets `panningModel` itself; the pool owns its spatial nodes (`^1.4.0`). Default
 stays `'stereo'` (a `StereoPanner` per voice), byte-identical to prior releases.
+
+> [!CAUTION]
+> **HRTF is headphones-only and costs a convolution per live voice.**
+> - **A stereo/speaker layout hears no benefit** from `panningModel = 'HRTF'` and
+>   still pays the per-voice binaural convolution CPU. Reserve `'hrtf'` buses for a
+>   headphone target; a `'positional'` bus is the right default elsewhere.
+> - **Budget the voice count.** Each live HRTF voice runs its own HRIR
+>   convolution -- a dozen simultaneous HRTF voices is a very different CPU load
+>   from a dozen `StereoPanner` voices. The `gain=0` HRIR prewarm eats only the
+>   first-play hitch, not the steady-state cost.
+> - **Do not double-virtualize.** Stacking an engine-side `'hrtf'` bus on a headset
+>   that already virtualizes surround smears the image. `spatial` is one field, so
+>   `'hrtf'` and `'discrete'` cannot combine anyway.
 
 ### Stereo width (the Haas widener)
 
@@ -453,12 +598,53 @@ working page. See `decisions/0005-auto-suspend.md`.
 All readable via `signal()` (calling), `signal.peek()` (untracked read), or
 inside a `computed()` / `effect()`.
 
+## Composability
+
+The whole engine is one pipeline: construct with a bus list, `init()` the
+context, add spatial buses, route sounds to them, then drive voices and the mix.
+Every call below is the real signature -- SFX buses, a positional bus, an HRTF
+bus, and a discrete-surround bus all coexist, all driven by the same
+`play()` / `setPosition()` pair, with ducking and a snapshot morph layered on top.
+
+```js
+import { LiteAudio } from '@zakkster/lite-audio';
+
+// 1. construct + unlock the context
+const audio = new LiteAudio({ buses: ['sfx', 'music'] });
+await audio.init();                                   // creates the AudioContext
+
+// 2. add spatial buses (each returns its bus record; idempotent by name)
+audio.createBus('world', { spatial: 'positional' });  // PannerNode per voice
+audio.createBus('ears',  { spatial: 'hrtf' });        // + panningModel 'HRTF'
+audio.createBus('surround', { spatial: 'discrete', preset: '7.1' }); // VBAP; ladder-fitted
+
+// 3. define + route sounds AFTER their target bus exists
+await audio.defineSounds({
+    step:      { src: ['/step.wav'],      bus: 'world' },
+    whisper:   { src: ['/whisper.opus'],  bus: 'ears' },
+    explosion: { src: ['/boom.wav'],      bus: 'surround' },
+});
+
+// 4. play (zero-alloc hot path) and position (caller-frame safe every frame)
+const h = audio.play('explosion', 1, 0, 1);           // -> bus-tagged handle, or -1
+audio.setPosition(h, 8, 0, -3);                        // solved on the ~10 Hz monitor
+console.log(audio.effectiveLayoutOf('surround'));      // '7.1' | '5.1' | '3.1' | 'stereo'
+
+// 5. mix intelligence: dip music while SFX sound, then morph to a snapshot
+audio.duckOn('sfx', 'music', { threshold: 2, level: 0.3 });
+audio.captureSnapshot('combat');
+audio.applySnapshot('combat', 400);                    // 400 ms sidechain morph
+
+// 6. tear down: idempotent, disconnects the graph, restores the destination
+audio.destroy();
+```
+
 ## Options reference
 
 ```js
 new LiteAudio({
     buses:            ['sfx', 'ui', 'voice', 'music'],  // user-facing buses
-    poolCapacity:     32,                        // voices per bus pool
+    poolCapacity:     32,                        // voices per bus pool; integer 1..256
     queueLimit:       32,                        // bound on pre-unlock queue
     mutedStorageKey:  'lite_audio_muted',        // manager parity default
     fetch:            globalThis.fetch,          // injectable for tests
@@ -483,6 +669,18 @@ audio.createBus('pad', {
 
 - `width` is **omit-to-disable**: leaving it out builds no widener nodes (byte-identical to prior releases); a number in `[0, 1]` arms it and enables `setWidth()`. A non-finite / boolean / out-of-range value, or `width > 0` on a `positional`/`hrtf`/`discrete` bus, is a construction-time `RangeError`. A non-mono loaded source disarms it (see the Stereo width caution above).
 - `spatial: 'discrete'` builds a discrete surround bus in the pool's matching `channels: 8 | 6 | 4` mode; the requested `preset` (`'7.1'` | `'5.1'` | `'3.1'`) resolves down the fallback ladder to the largest layout the sink fits, and on a `< 4`-channel sink it falls back to a working stereo bus with `effectiveLayoutOf(name)` reporting `'stereo'` (correct, not a failure). A request never upgrades. `preset` is valid only with `spatial: 'discrete'` (a `RangeError` elsewhere); an unknown preset is a `RangeError`. See the Discrete surround section above.
+- `poolCapacity` is an integer in `1..256`. A pool channel packs into the low 8 bits of a handle (`poolHandle & 0xFF`), so a capacity past `256` would wrap channel `256` onto channel `0`; a non-integer, `< 1`, or `> 256` value is a construction-time `RangeError` (fail closed, `Number.isInteger` rejects `NaN` first). See [`decisions/0001`](decisions/0001-handle-namespace.md).
+
+## Constants
+
+| Constant | Value | Meaning |
+| -------- | ----- | ------- |
+| `VERSION` | `'2.5.1'` | Package version, in lockstep with `package.json`. |
+| `MAX_BUSES` | `2097152` (`2^21`) | Bus-index ceiling: a handle stays exact-integer only while `busIndex <= 2^21 - 1`. `init()` / `createBus()` throw past it. |
+| `MAX_POOL_CAPACITY` | `256` | Pool-channel ceiling: a channel packs into the low 8 bits of a handle. The constructor throws past it. |
+| Handle codec | `busIndex * 2^32 + ((gen << 8) \| channel)` | Bus tag in the high half, `[gen:24][channel:8]` pool handle in the low half. |
+| `Skipped` | `-1` | `play()` / `playUnique()` did nothing; inert to `stop()`. |
+| `TrackStarted` | `-2` | `playUnique()` started a name-addressed track; inert to `stop()`. |
 
 ## Migration from lite-audio-manager
 
@@ -515,7 +713,7 @@ Full migration guide: [`MIGRATION.md`](MIGRATION.md).
 npm test
 ```
 
-153 tests across 43 suites. The unlock state machine (including `'interrupted'`),
+325 tests across 97 suites. The unlock state machine (including `'interrupted'`),
 loader fallback + error, bus writes as `setTargetAtTime`, pool delegation (steal,
 generation no-op on stale handles, bus scope), unlock queue semantics
 (latest-per-sound, bounded), destroy idempotency -- plus the whole music layer
@@ -584,6 +782,86 @@ Not covered, and honestly so: `pickSupportedSrc()` probes the real `document` /
 `Audio` globals rather than the injected ones, so under `node:test` it always takes
 the "first URL wins" branch. The `canPlayType` path is unexercised.
 
+## Zero-GC design notes
+
+<details>
+<summary>Where the bytes went, and why every hot path is 0 B/op.</summary>
+
+The rule is simple and load-bearing: **no allocation on any path a caller can hit
+per frame.** A hot path here means `play()`, `stop()`, `isPlaying()`,
+`setPosition()`, `setWidth()`, and the shared `~10 Hz` monitor tick (meters, duck
+follower, auto-suspend, position flush, lane flush, width flush). Each is held to
+its budget by a torture tier with a proven red control that forces the failure it
+guards.
+
+| Path | Allocation | How |
+| ---- | ---------- | --- |
+| `play(id, vol, pan, pitch)` | 0 B (handle is a plain `number`) | four positional scalars, no options object, no per-play closure; the pool reuses a channel |
+| `stop(handle)` / `isPlaying(handle)` | 0 B | decode the handle with `/ 2^32` and `>>> 0`, O(1) pool lookup |
+| `setPosition(h, x, y, z)` | 0 B | stamps three floats into a pre-allocated scratch + a dirty bit; the `positionX/Y/Z` writes ride the cold monitor |
+| `setWidth(bus, w)` | 0 B (`<= 4 B/op` gate) | clamps to `[0, 1]`, stamps a target + dirty bit; `wet`/`makeup` writes ride the monitor |
+| lane solve (`_flushLanes`) | 0 B | data-driven VBAP walk into one reused `Float32Array(8)`, exactly `lanes` writes, no per-tick preset branch |
+| monitor tick | 0 B retained | RMS reads into one pre-allocated `Float32Array` per bus; every param write is `setTargetAtTime` |
+
+The handle stays a plain `number` so `play()` never boxes -- it leaves V8's
+small-integer range on any bus `>= 1`, but the boxed-double cost is below the
+gate's resolution (measured in [`decisions/0001`](decisions/0001-handle-namespace.md)).
+Param events are rate-bounded: a caller writing at `60 Hz` still produces at most
+`~100` events/param/voice under a `200` cap, because the writes are throttled onto
+the `~10 Hz` monitor rather than hitting the `AudioParam` directly.
+
+The gate is falsifiable. Each tier ships a red control (`LITEAUDIO_TORTURE_*_RED`)
+that swaps in the allocating or rate-blowing variant and MUST make the gate exit
+non-zero, so a green gate proves the gate can still see a regression.
+
+</details>
+
+## Design decisions worth knowing
+
+- **The handle is bus-tagged, not just generation-stamped.** A generation counter
+  is a recycle counter, not a namespace -- every bus's pool starts at channel 0 /
+  gen 0, so without the tag `stop()` on an `sfx` handle also killed channel 0 of
+  every other bus. [`decisions/0001`](decisions/0001-handle-namespace.md),
+  [`0002`](decisions/0002-generation-wrap.md).
+- **Mix automation lives on a sidechain gain.** Ducking and snapshot morphs write
+  `duckGain`, not the volume param, so they compose with volume/mute instead of two
+  automations clobbering one `AudioParam`. [`0003`](decisions/0003-ducking.md),
+  [`0004`](decisions/0004-snapshots.md).
+- **Auto-suspend is off by default and refused on iOS**, where a suspend->resume
+  can demand a fresh gesture and silently un-unlock a working page.
+  [`0005`](decisions/0005-auto-suspend.md).
+- **Fail closed on every unverified reading.** An unknown `maxChannelCount`, a
+  non-integer `poolCapacity`, a bus count past `2^21`, a stolen handle: each is an
+  error or a silent no-op, never an optimistic guess. `null` is not zero.
+
+## What this is not
+
+- **Not a decoder or format library.** No MP3/OGG shim, no `canPlayType`
+  negotiation beyond first-URL-wins under test, no HTML5 Audio fallback. It targets
+  the Web Audio surface every browser has shipped since 2018.
+- **Not a Howler replacement for a broad-audience site.** If you need legacy
+  fallback and format detection across a long tail of browsers, use Howler. This is
+  for games and interactive tools that can assume modern Web Audio.
+- **Not a room-acoustics or reverb engine.** The spatial suite is panning
+  (StereoPanner / PannerNode / HRTF / VBAP) and a Haas widener, not convolution
+  reverb, occlusion, or a ray-traced acoustic model.
+- **Not a multichannel guarantee.** Discrete surround needs a real `>= 4`-channel
+  sink; a virtual-surround headset reporting `maxChannelCount 2` gets the correct
+  stereo fallback. The audible multi-lane render is a manual-QA step, not a CI gate.
+
+## Ecosystem
+
+Part of the [LiteLibrariesSuite](https://github.com/sponsors/PeshoVurtoleta) --
+zero-GC, single-file ESM micro-libraries under `@zakkster/*`.
+
+- [`@zakkster/lite-signal`](https://www.npmjs.com/package/@zakkster/lite-signal) --
+  the reactive graph lite-audio's control surface is built on (peer).
+- [`@zakkster/lite-audio-pool`](https://www.npmjs.com/package/@zakkster/lite-audio-pool) --
+  the per-bus voice pool: ABA-safe handles, stereo / positional / HRTF / discrete
+  channel modes (peer).
+- `@zakkster/lite-audio/compat` -- the `AudioManager`-shaped drop-in for migrating
+  a `lite-audio-manager` app by one import.
+
 ## License
 
-MIT. Copyright Zahary Shinikchiev.
+MIT (c) Zahary Shinikchiev &lt;shinikchiev@yahoo.com&gt;.

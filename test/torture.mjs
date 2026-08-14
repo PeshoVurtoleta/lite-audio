@@ -318,6 +318,37 @@ const SP3_LANE_FRAMES_PER_TICK = 6;
 const SP3_LANE_EVENT_CAP = 200;
 const SP3_LANE_RATE_RED_HZ = 60;
 
+// --- PS1 destroyBus config (T-SP7) -------------------------------------------
+
+// T-SP7: create/destroyBus retention + node census. destroyBus tombstones ONE
+// dynamic bus (hollows the record IN PLACE, keeps the _busList slot) and releases
+// its pool, positional/discrete/width scratch, per-bus signals, monitor
+// registrations and graph edges -- without disturbing any surviving bus's live
+// handles. Three things need proving and the bytesPerOp gate alone cannot do the
+// first two: (a) the destroyBus contract + node census -- a destroyed discrete
+// bus's pooled voices are STOPPED (live source-node census returns to baseline)
+// and the bus is pulled out of _discreteBuses so no husk rides the lane flush;
+// (b) a 4096-cycle create/destroyBus soak retains nothing (a lite-leak witness
+// settles to 0 -- signals disposed, husk deregistered) with maxMajor:0 and
+// maxPauseMs<=4; (c) the tombstone keeps _busList length + every surviving index
+// stable so live handles still resolve. The red control (DESTROYBUS_RED) models a
+// destroyBus that SKIPS the _discreteBuses swap-pop and leaves the pool live, so
+// the husk rides the lane flush and its voices stay live -> census > 0 -> reject.
+const SP7_CYCLES = 4096;         // create/destroyBus churn cycles (retention + GC)
+const SP7_CENSUS_VOICES = 4;     // voices played per census engine
+// The five bus presets destroyBus must tear down. Each createBus builds a distinct
+// teardown surface: stereo (bare gain graph), positional/hrtf (PannerNode family +
+// posXYZ scratch when pooled), width (7 Haas nodes armed at createBus), discrete
+// (lanes != 0 -> pushed to _discreteBuses, vbap record). All ride the same cold
+// destroyBus.
+const SP7_PRESETS = [
+    ['stereo', {}],
+    ['positional', { spatial: 'positional' }],
+    ['hrtf', { spatial: 'hrtf' }],
+    ['width', { width: 0.5 }],
+    ['discrete', { spatial: 'discrete', preset: '7.1' }],
+];
+
 const LEAK = process.env.LITEAUDIO_TORTURE_LEAK === '1';
 const SP1_RED = process.env.LITEAUDIO_TORTURE_SP1_RED === '1';
 const SP2_RED = process.env.LITEAUDIO_TORTURE_SP2_RED === '1';
@@ -343,6 +374,12 @@ const SP6_ALLOC_RED = process.env.LITEAUDIO_TORTURE_SP6_ALLOC_RED === '1';
 const SP4_RED = process.env.LITEAUDIO_TORTURE_SP4_RED === '1';
 const SP3_LANE_RED = process.env.LITEAUDIO_TORTURE_SP3_LANE_RED === '1';
 const SP3_RATE_RED = process.env.LITEAUDIO_TORTURE_SP3_RATE_RED === '1';
+// PS1 red control. DESTROYBUS_RED models a destroyBus that SKIPS the _discreteBuses
+// swap-pop AND leaves the pool live: the tombstoned husk stays wired into the lane
+// flush with its voices still sounding, so the live source-node census never
+// returns to baseline. The census assertion (delta 0) then catches it FOR THE
+// ACTUAL REASON (a leaked live node riding the husk), and the gate must exit 1.
+const DESTROYBUS_RED = process.env.LITEAUDIO_TORTURE_DESTROYBUS_RED === '1';
 
 // --- helpers -----------------------------------------------------------------
 
@@ -774,6 +811,24 @@ async function buildDiscreteEngine(voices, preset = '7.1', maxChannelCount = 8, 
             '-gain lane array)');
     }
     return { audio, ctx, handles, busRec, laneCount, baseline };
+}
+
+/**
+ * The broken teardown the DESTROYBUS_RED control uses in place of destroyBus: it
+ * drops the name bindings (a tombstone that createBus/play() would treat as gone)
+ * but SKIPS the _discreteBuses swap-pop AND leaves the pool live -- so the husk
+ * stays registered in the lane flush with its pooled voices still sounding.
+ * Modelling the exact regression the swap-pop + pool.destroy() exist to prevent:
+ * a destroyBus that forgets to pull the bus out of the monitor lane list leaks
+ * every live voice on it. The census (delta 0) is what catches it.
+ */
+function redDestroyBus(audio, name) {
+    const busRec = audio._buses.get(name);
+    if (!busRec) return false;
+    audio._buses.delete(name);
+    audio._soundsByBus.delete(name);
+    busRec.dead = true;                  // tombstoned by name, but pool + list untouched
+    return true;
 }
 
 // --- gate --------------------------------------------------------------------
@@ -1659,6 +1714,178 @@ async function main() {
             'posXYZ/posOwner/posDirty scratch or the vbap record after destroy() -- a teardown leak.');
     }
 
+    // 13) T-SP7 (PS1): destroyBus -- individual dynamic-bus teardown.
+    //     (a) contract + node census on a discrete bus (the richest teardown: a
+    //         live pool, posXYZ scratch, a _discreteBuses registration and a vbap
+    //         record). destroyBus returns true; a second call returns false; the
+    //         pooled voices are STOPPED (live source-node census returns to the
+    //         pre-play baseline); the husk is pulled out of _discreteBuses; the
+    //         _busList slot is KEPT (length unchanged) as an inert husk that
+    //         _flushLanes/_flushPositions skip; the NEXT createBus appends (index
+    //         == old length). The red control leaves the pool live + the husk in
+    //         the lane flush, so the census stays > baseline and the gate rejects.
+    const sp7 = await buildDiscreteEngine(SP7_CENSUS_VOICES, '7.1', 8, true);
+    const sp7Busrec = sp7.busRec;
+    const sp7ListLen = sp7.audio._busList.length;
+    const sp7ArmedLive = sp7.ctx._liveNodes();
+    if (sp7ArmedLive < 1) die('T-SP7: no live voices before destroyBus -- census would be vacuous');
+
+    let sp7Ret;
+    if (DESTROYBUS_RED) {
+        sp7Ret = redDestroyBus(sp7.audio, 'surr');
+        // Drive the lane flush the husk was NOT pulled from: the retained pool's
+        // voices keep being written and stay live -- exactly the leak the swap-pop
+        // exists to prevent.
+        sp7.audio._flushLanes();
+        sp7.audio._flushLanes();
+    } else {
+        sp7Ret = sp7.audio.destroyBus('surr');
+    }
+    const sp7AfterLive = sp7.ctx._liveNodes();
+    const sp7CensusDelta = sp7AfterLive - sp7.baseline;
+    const sp7Second = sp7.audio.destroyBus('surr');            // idempotent -> false
+    // The tombstone is inert on the monitor: neither flush may throw over the husk.
+    sp7.audio._flushLanes();
+    sp7.audio._flushPositions();
+    const sp7ListStable = sp7.audio._busList.length === sp7ListLen;
+    const sp7Reindex = sp7.audio.createBus('surr2', {}).index === sp7ListLen;
+    const sp7InDiscrete = sp7.audio._discreteBuses.indexOf(sp7Busrec) !== -1;
+
+    process.stderr.write('T-SP7 (a) destroyBus contract + census ' +
+        (DESTROYBUS_RED ? '(RED: swap-pop skipped, pool left live)' : '') +
+        ': returned=' + sp7Ret + ' second=' + sp7Second +
+        ' armed-live=' + sp7ArmedLive + ' -> after-live=' + sp7AfterLive +
+        ' (baseline ' + sp7.baseline + ', delta ' + sp7CensusDelta + ')' +
+        ' _busList stable=' + sp7ListStable + ' reindex=' + sp7Reindex +
+        ' husk-in-discrete=' + sp7InDiscrete + '\n');
+
+    if (DESTROYBUS_RED) {
+        if (sp7CensusDelta === 0) {
+            die('DESTROYBUS_RED: the swap-pop-skipping teardown left the census clean (delta 0) -- ' +
+                'the red control is no longer modelling the leak it claims and cannot prove this gate ' +
+                'is falsifiable.');
+        }
+        die('DESTROYBUS_RED: destroyBus skipped the _discreteBuses swap-pop and left the pool live, ' +
+            'so ' + sp7CensusDelta + ' voice(s) still sound on the tombstoned husk (census ' + sp7AfterLive +
+            ' vs baseline ' + sp7.baseline + ') -- rejecting as designed. This is the red control; a ' +
+            'clean run does not take this branch.');
+    }
+    if (sp7Ret !== true) die('T-SP7: destroyBus on a live dynamic discrete bus returned ' + sp7Ret + ' (expected true).');
+    if (sp7Second !== false) die('T-SP7: a second destroyBus returned ' + sp7Second + ' (expected false, idempotent).');
+    if (sp7CensusDelta !== 0) {
+        die('T-SP7: after destroyBus the live source-node census is ' + sp7AfterLive + ' vs baseline ' +
+            sp7.baseline + ' (delta ' + sp7CensusDelta + ') -- pool.destroy() must stop every voice on the bus.');
+    }
+    if (!sp7ListStable) die('T-SP7: destroyBus changed _busList.length (tombstone must keep the slot -- never splice).');
+    if (!sp7Reindex) die('T-SP7: the next createBus did not append at index == old _busList.length (a hole was filled).');
+    if (sp7InDiscrete) die('T-SP7: the destroyed bus is still registered in _discreteBuses -- the swap-pop did not run.');
+    if (!sp7Busrec.dead || sp7Busrec.pool !== null) {
+        die('T-SP7: the tombstone is not fully hollowed (dead=' + sp7Busrec.dead + ', pool=' + sp7Busrec.pool + ').');
+    }
+    sp7.audio.destroy();
+
+    //     (b) 4096-cycle create/destroyBus soak: retention + GC budget. A persistent
+    //         engine churns the five presets create/destroyBus; destroyBus disposes
+    //         each bus's per-bus signals + write effect (so the shared lite-signal
+    //         node pool is NOT exhausted over the soak), disarms the widener, and
+    //         deregisters the discrete husk. A lite-leak witness is untracked ONLY on
+    //         proof the record is a hollowed tombstone (dead + pool null + scratch
+    //         null), so a teardown that stops releasing leaves the ledger nonzero.
+    //         The same churn runs under a GcProfiler: maxMajor 0, maxPauseMs <= 4.
+    const sp7Ctx = createMockContext({ state: 'running', maxChannelCount: 8 });
+    const sp7Win = {
+        navigator: { userAgent: 'node-torture-gate', maxTouchPoints: 0 },
+        addEventListener: () => {}, removeEventListener: () => {},
+    };
+    const sp7Audio = new LiteAudio({
+        poolCapacity: 4, window: sp7Win, document: mockDocument(), fetch: mockFetch({}),
+        setTimeout: () => 0, clearTimeout: () => {},
+    });
+    await sp7Audio.init(sp7Ctx);
+
+    const sp7Tracker = createLeakTracker({ name: 'lite-audio-destroybus-soak' });
+    const SP7_NOOP = () => {};
+    const sp7Kept = [];
+    let sp7Undead = 0;
+    const sp7BaseList = sp7Audio._busList.length;
+    for (let c = 0; c < SP7_CYCLES; c++) {
+        const preset = SP7_PRESETS[c % SP7_PRESETS.length];
+        const bn = 'churn' + c;                             // unique name -> a fresh husk each cycle
+        const rec = sp7Audio.createBus(bn, preset[1]);
+        const sentinel = { cycle: c };
+        sp7Kept.push(sentinel);
+        const witness = sp7Tracker.track(sentinel, SP7_NOOP, c);
+        const ok = sp7Audio.destroyBus(bn);
+        // Untrack ONLY on the full teardown proof: destroyBus returned true, the
+        // record is a hollowed tombstone, and it is gone from _buses/_discreteBuses.
+        if (ok && rec.dead && rec.pool === null && rec.posXYZ === null &&
+            rec.vbap === null && rec.wideIn === null &&
+            !sp7Audio._buses.has(bn) && sp7Audio._discreteBuses.indexOf(rec) === -1) {
+            sp7Tracker.untrack(witness);
+        } else {
+            sp7Undead++;
+        }
+    }
+    if (sp7Kept.length !== SP7_CYCLES) die('T-SP7: internal -- pinned ' + sp7Kept.length + ' of ' + SP7_CYCLES);
+    const sp7Leaked = sp7Tracker.size();
+    // The husks tombstone in place: _busList grew by exactly SP7_CYCLES, every slot kept.
+    const sp7Grew = sp7Audio._busList.length - sp7BaseList;
+
+    // GC budget over a fresh churn window on a FRESH engine (isolated from the
+    // retention loop's retained tombstones + tracking allocation, so the measured
+    // GC behaviour is the create/destroyBus pair's alone). stabilize:true anchors a
+    // forced-GC live-set baseline before the steady window -- the same discipline
+    // every measured tier in this file uses -- so warmup churn is not counted; the
+    // steady phase must fire NO major GC and hold pauses under maxPauseMs. bytesPerOp
+    // is NOT gated: the tombstone legitimately retains one husk per cycle by design
+    // (R2), which is exactly the per-op retained growth this figure reports.
+    const sp7GcCtx = createMockContext({ state: 'running', maxChannelCount: 8 });
+    const sp7GcAudio = new LiteAudio({
+        poolCapacity: 4, window: sp7Win, document: mockDocument(), fetch: mockFetch({}),
+        setTimeout: () => 0, clearTimeout: () => {},
+    });
+    await sp7GcAudio.init(sp7GcCtx);
+    const sp7GcBase = sp7GcAudio._busList.length;
+    const sp7GcRow = (() => {
+        const r = measureOps((n) => {
+            const preset = SP7_PRESETS[n % SP7_PRESETS.length];
+            const bn = 'gc' + n;
+            sp7GcAudio.createBus(bn, preset[1]);
+            sp7GcAudio.destroyBus(bn);
+        }, { ops: SP7_CYCLES, warmup: 256, source: 'gc', stabilize: true });
+        return { summary: r.summary, noMajor: checkNoGc(r.summary, RULES).ok, bpo: r.bytesPerOp };
+    })();
+    const sp7Summary = sp7GcRow.summary;
+    const sp7GcReport = { ok: sp7GcRow.noMajor };
+    const sp7GcGrew = sp7GcAudio._busList.length - sp7GcBase;
+
+    process.stderr.write('T-SP7 (b) create/destroyBus soak (' + SP7_CYCLES + ' cycles x {stereo,positional,' +
+        'hrtf,width,discrete}): lite-leak witnessed ' + sp7Leaked + ' un-released bus record(s), ' +
+        sp7Undead + ' incomplete teardown(s); _busList tombstoned +' + sp7Grew + ' husk(s) (all slots kept) | ' +
+        'gc major=' + sp7Summary.gc.major + ' minor=' + sp7Summary.gc.minor +
+        ' maxMs=' + sp7Summary.gc.maxMs.toFixed(2) + ' (+' + sp7GcGrew + ' husks, ' +
+        (Number.isFinite(sp7GcRow.bpo) ? sp7GcRow.bpo.toFixed(0) : 'null') + ' B/op tombstone)\n');
+
+    if (sp7Undead !== 0) {
+        die('T-SP7: ' + sp7Undead + ' create/destroyBus cycle(s) did not leave a hollowed tombstone -- ' +
+            'destroyBus must null the pool + scratch, disarm the widener and deregister the husk.');
+    }
+    if (sp7Leaked !== 0) {
+        die('T-SP7: lite-leak witnessed ' + sp7Leaked + ' bus record(s) still un-released after ' +
+            SP7_CYCLES + ' create/destroyBus cycles -- a teardown leak the bytesPerOp gate cannot see.');
+    }
+    if (sp7Grew !== SP7_CYCLES) {
+        die('T-SP7: _busList grew by ' + sp7Grew + ' over ' + SP7_CYCLES + ' cycles (expected ' + SP7_CYCLES +
+            ') -- destroyBus must TOMBSTONE the slot in place, never splice and never reuse it.');
+    }
+    if (!sp7GcReport.ok) {
+        die('T-SP7: the create/destroyBus soak violated ' + JSON.stringify(RULES) + ' (major=' +
+            sp7Summary.gc.major + ', maxMs=' + sp7Summary.gc.maxMs.toFixed(2) + ') -- destroyBus is ' +
+            'allocating or forcing a major GC on the churn path.');
+    }
+    sp7Audio.destroy();
+    sp7GcAudio.destroy();
+
     process.stderr.write(
         'result: boxed-double handle (bus>=1, gen>8388608) is below the gate resolution; ' +
         'plain-number handle keeps its zero-retain property (decisions/0001). The v1.2.0 ' +
@@ -1678,7 +1905,10 @@ async function main() {
         'writes/voice/flush for 7.1/5.1/3.1, LFE at index 3 an azimuth-invariant send) and ' +
         'rate-bounded to ~100 events/lane under a 200 cap, with destroy() releasing the per-bus ' +
         'scratch + vbap record and restoring the pristine destination triple across ' +
-        (SP3_LANE_CYCLES * 3) + ' build/teardown cycles (T-SP3-lane).\n');
+        (SP3_LANE_CYCLES * 3) + ' build/teardown cycles (T-SP3-lane). PS1: destroyBus ' +
+        'tombstones ONE dynamic bus in place -- pooled voices stopped (census delta 0), the ' +
+        'husk pulled out of the lane flush, _busList length + every surviving index kept stable, ' +
+        'released clean across ' + SP7_CYCLES + ' create/destroyBus cycles under maxMajor:0/maxPauseMs<=4 (T-SP7).\n');
     process.stdout.write('ok\n');
     process.exit(0);
 }

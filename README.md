@@ -399,6 +399,26 @@ a `RangeError` rather than issuing colliding handles. `{ meter: true }` taps an
 bus -- zero allocation per read. An unmetered bus allocates no analyser and
 `level()` returns `null`. See `decisions/0006-dynamic-bus.md`.
 
+`destroyBus(name)` tears one dynamic bus down without disturbing any other bus's
+live handles -- for apps that churn buses across scenes or routes:
+
+```js
+audio.createBus('scene1', { spatial: 'positional' });
+// ... scene runs ...
+audio.destroyBus('scene1');   // -> true; stops voices, frees pool + graph + signals
+audio.destroyBus('scene1');   // -> false (idempotent: already gone)
+```
+
+It returns `true` when a live dynamic bus was destroyed, `false` for an unknown or
+already-destroyed bus. It throws on `'master'` or a **static** bus (one from
+`opts.buses`) -- those are structural topology, not per-scene resources. A handle
+from a destroyed bus goes inert (`stop()` / `setPosition()` no-op, `isPlaying()`
+false) because the bus record is hollowed into a husk that every hot path already
+fail-closes on. The `_busList` slot is kept as a tombstone and never reused (a
+voice handle decodes its bus by array index, so the array must never shift), which
+counts against the 2^21 ceiling; `destroyBus` of a discrete bus does not shrink
+`destination.channelCount`. See `decisions/0010-bus-tombstone.md`.
+
 ### Spatial buses: positional and HRTF
 
 ```js

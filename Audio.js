@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.5.1';
+export const VERSION = '2.6.0';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -817,6 +817,15 @@ export class LiteAudio {
         const busRec = {
             index: this._busList.length,
             gain, duckGain, volume: sVol, muted: sMut, effect: busEffect, pool: null,
+            // Lifecycle bookkeeping (PS1). `dynamic` is false for every bus _buildBus
+            // constructs; createBus() stamps it true on the record it built, so only a
+            // createBus() bus can be torn down by destroyBus() (a static opts.buses bus
+            // stays dynamic:false and destroyBus() refuses it). `dead` latches true once
+            // destroyBus() has hollowed this record into an inert tombstone -- a second
+            // destroyBus() reads it and no-ops. Both are cold data on a cold-constructed
+            // literal; no hot body reads them per shot.
+            dynamic: false,
+            dead: false,
             // Ducking state. `duckManual` latches when a caller invokes duck()
             // explicitly: while set, the automatic follower leaves this bus
             // alone, so an explicit duck always wins (and stopDuck() clears it).
@@ -2113,7 +2122,137 @@ export class LiteAudio {
                 'and stops being an exact integer past bus index 2^21 - 1.'
             );
         }
-        return this._buildBus(name, opts);
+        const busRec = this._buildBus(name, opts);
+        // Stamp the record as dynamically created (PS1). Only createBus() buses carry
+        // dynamic:true, so destroyBus() can tear this one down individually; the static
+        // opts.buses set (built by the same _buildBus) stays dynamic:false and is refused.
+        busRec.dynamic = true;
+        return busRec;
+    }
+
+    /**
+     * Tear down ONE dynamic bus (a bus built by createBus), releasing its pool,
+     * positional/discrete/width scratch, per-bus signals, monitor registrations and
+     * graph edges -- WITHOUT disturbing any other bus's live voice handles. This is
+     * the per-bus counterpart to createBus: a long-lived app that churns dynamic
+     * buses (SPA route changes, scene swaps) would otherwise retain every bus's
+     * graph, pool and signals for the process life. Cold path only; play(), stop(),
+     * setPosition(), the lane/position flushes and the monitor tick gain no branch --
+     * they already fail-close on a hollowed bus.
+     *
+     * TOMBSTONE, not splice. Every voice handle decodes its owning bus by array
+     * index (this._busList[(handle / BUS_STRIDE) | 0]); splicing the bus out of
+     * _busList would shift every later bus's index and silently reassign live handles
+     * to the WRONG bus. So the record is hollowed IN PLACE and its _busList slot is
+     * kept as an inert husk (pool:null, lanes:0, posDirty:null) that every hot/monitor
+     * path already fail-closes on. The slot is never reused; createBus keeps appending
+     * (tombstones count against the 2^21 bus ceiling -- see decisions/0010).
+     *
+     * Idempotent and fail-closed: returns true when a live dynamic bus was torn down;
+     * false for an unknown name, an already-dead bus, or a destroyed engine. Throws on
+     * 'master' or a STATIC bus (one from opts.buses) -- those are structural topology,
+     * not a per-scene resource.
+     *
+     * @param {string} name
+     * @returns {boolean} true if a live dynamic bus was destroyed, else false.
+     */
+    destroyBus(name) {
+        if (this._destroyed) return false;
+        if (name === 'master') {
+            throw new Error('LiteAudio: "master" is a reserved bus and cannot be destroyed');
+        }
+        const busRec = this._buses.get(name);
+        if (!busRec) return false;                 // unknown / already deleted -> no-op
+        if (busRec.dead) return false;             // double-destroy -> no-op
+        if (!busRec.dynamic) {
+            throw new Error('LiteAudio: bus "' + name + '" is static (from opts.buses) and ' +
+                'cannot be destroyed; only createBus() buses can be torn down individually.');
+        }
+
+        // Reuse destroy()'s per-bus teardown for this ONE bus. pool.destroy() first so
+        // voice fade-outs schedule against a still-live graph, THEN pool = null: the
+        // stop()/isPlaying()/play() fail-closed guards all key off !busRec.pool, so the
+        // explicit null is REQUIRED to make a stale handle a no-op.
+        if (busRec.pool) { try { busRec.pool.destroy(); } catch {} busRec.pool = null; }
+        // Release the positional/discrete scratch (S3/S6). Null, not zero: a torn-down
+        // bus has no voices, so a stray setPosition after teardown must no-op.
+        busRec.posXYZ = null;
+        busRec.posOwner = null;
+        busRec.posDirty = null;
+        // Drop any live HRIR prewarm handle (SP-07); the pool is gone, so no retire tick
+        // may try to stop a handle into a torn-down pool.
+        busRec.hrtfWarmHandle = null;
+        busRec.hrtfWarmPending = 0;
+        // Disconnect + null all 7 stereo widener nodes (S5) and reset width state, so a
+        // stray setWidth after teardown no-ops via the wideIn===null guard.
+        this._disarmWidth(busRec, null);
+        busRec.width = 0;
+        busRec.widthLast = NaN;
+        busRec.widthRefused = null;
+        // Reset discrete-surround state (S6/S7): lanes to 0 so the husk never re-enters
+        // _flushLanes, vbap/effectiveLayout to null so no cold solve runs against it and
+        // a stray effectiveLayoutOf reads "no discrete bus".
+        busRec.lanes = 0;
+        busRec.vbap = null;
+        busRec.effectiveLayout = null;
+
+        // Disconnect the bus graph and dispose the per-bus signals + write effect,
+        // exactly as destroy() does -- idempotent, foreign-safe blanket try/catch.
+        try { busRec.gain.disconnect(); } catch {}
+        try { busRec.duckGain?.disconnect(); } catch {}
+        try { busRec.analyser?.disconnect(); } catch {}
+        try { dispose(busRec.volume); } catch {}
+        try { dispose(busRec.muted); } catch {}
+        if (busRec.level) { try { dispose(busRec.level); } catch {} }
+        try { dispose(busRec.effect); } catch {}
+
+        // Swap-pop the bus's write-effect handle out of _effectHandles so a later full
+        // destroy() does not walk it a second time. Order is irrelevant here, so a
+        // swap-with-last + pop is allocation-free (no splice, no shift).
+        const eh = this._effectHandles;
+        for (let i = 0; i < eh.length; i++) {
+            if (eh[i] === busRec.effect) { eh[i] = eh[eh.length - 1]; eh.pop(); break; }
+        }
+
+        // Deregister from the two monitor lists by swap-pop (order irrelevant on both).
+        // A husk left in either list would ride the flush; it is pulled out here so the
+        // monitor never visits it again. Not-present is a no-op (loop finds nothing).
+        const mb = this._meteredBuses;
+        for (let i = 0; i < mb.length; i++) {
+            if (mb[i] === busRec) { mb[i] = mb[mb.length - 1]; mb.pop(); break; }
+        }
+        const db = this._discreteBuses;
+        for (let i = 0; i < db.length; i++) {
+            if (db[i] === busRec) { db[i] = db[db.length - 1]; db.pop(); break; }
+        }
+
+        // Drop the name bindings. The _busList[busRec.index] slot is KEPT as a dead
+        // husk -- never spliced, never nulled (a null element would break the
+        // _flushPositions busRec.lanes read) and never reused. _duckRules and
+        // _snapshots are left untouched: both already fail-closed by name resolution
+        // (_buses.get returns undefined for a destroyed bus and each guard skips it).
+        this._buses.delete(name);
+        this._soundsByBus.delete(name);
+
+        // Null the disconnected graph refs + meter buffer LAST (after the swap-pops that
+        // read busRec.effect and match on the busRec identity) so the husk retains only
+        // its bookkeeping (index/dynamic/dead), not the node graph or the metering
+        // scratch. destroy() skips this because it clears _busList wholesale; a destroyBus
+        // husk PERSISTS for the engine's life, so shrinking it here is a real retention
+        // win for the churn case this method serves. No hot/monitor path reads these on a
+        // husk (pool/posDirty/lanes are already null/0 and each walker fail-closes first).
+        busRec.gain = null;
+        busRec.duckGain = null;
+        busRec.analyser = null;
+        busRec.meterBuffer = null;
+        busRec.volume = null;
+        busRec.muted = null;
+        busRec.level = null;
+        busRec.effect = null;
+        busRec.poolOut = null;
+
+        busRec.dead = true;
+        return true;
     }
 
     /**

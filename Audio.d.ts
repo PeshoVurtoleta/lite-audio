@@ -410,6 +410,20 @@ export class LiteAudio {
      */
     createBus(name: string, opts?: CreateBusOptions): unknown;
 
+    /**
+     * Tear down ONE dynamic (createBus()) bus (v2.6.0): stop its voices, destroy
+     * its pool, disconnect its graph, dispose its per-bus signals + write effect,
+     * and deregister it from the metered/discrete monitor lists. The bus record is
+     * hollowed IN PLACE and its _busList slot kept as an inert husk -- never
+     * spliced (a voice handle decodes its bus by array index) and never reused, so
+     * the hot path gains no new branch. Returns true when a live dynamic bus was
+     * destroyed, false for an unknown name, an already-destroyed bus, or a
+     * destroyed engine (idempotent). Throws on 'master' (reserved) or a STATIC bus
+     * from opts.buses (structural topology, not a per-scene resource). Does NOT
+     * shrink destination.channelCount or stop the shared monitor. See decisions/0010.
+     */
+    destroyBus(name: string): boolean;
+
     /** A metered bus's level signal (RMS, ~10 Hz), or null on an unmetered/unknown bus. */
     level(busName: string): ReadSignal<number> | null;
 

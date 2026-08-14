@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.6.0
+
+Dynamic-bus teardown (post-suite backlog PS1). Adds one public cold-path method,
+`destroyBus(name)`, so a `createBus()` bus can be torn down individually instead
+of only at full `destroy()`. NO hot-path or behavior change to `play()`,
+`setPosition()`, `stop()`, `_flushLanes()`, `_flushPositions()`, or the ~10 Hz
+monitor tick; both `HashParity` goldens (`play()`, `stop()`) are frozen.
+
+### NEW
+
+- `destroyBus(name) -> boolean`: hollows one dynamic bus in place -- stops its
+  voices, destroys its pool, disconnects its graph, disposes its per-bus signals
+  (volume, mute, metered level) and write effect, and deregisters it from the
+  monitor's metered/discrete lists. Returns `true` when a live dynamic bus was
+  destroyed, `false` for an unknown name, an already-destroyed bus, or a
+  destroyed engine (idempotent). Throws on `'master'` (reserved) or a STATIC bus
+  from `opts.buses` (structural topology, not a per-scene resource).
+
+### TOMBSTONE, NOT SPLICE (decision 0010)
+
+- A voice handle decodes its owning bus by array index
+  (`_busList[(handle / 2^32) | 0]`), so `destroyBus` CANNOT splice `_busList`
+  without shifting every later bus's index and reassigning live handles to the
+  wrong bus. It instead hollows the bus record into an inert husk and KEEPS the
+  `_busList` slot (never spliced, never reused). Every hot/monitor path already
+  fail-closes on a husk (`stop`/`isPlaying`/`play` on `!busRec.pool`,
+  `setPosition`/`_flushPositions` on `posDirty === null`, `_flushLanes` walks
+  only the deregistered discrete list), so the hot path gains ZERO new branches.
+- Tombstones count against the 2^21 bus ceiling; an app churning > ~2M buses in
+  one session hits the `createBus` `RangeError`. Index reclaim (with a
+  bus-generation stamp) is a future session.
+- `destroyBus` of a discrete bus does NOT shrink `destination.channelCount` (it
+  is process-global and monotonic add-only, restored only at full `destroy()`),
+  and does NOT stop the shared monitor when it removes the last consumer
+  (idle-monitor sleep is a separate backlog item). `_duckRules` and `_snapshots`
+  that name a destroyed bus are left untouched -- both already fail closed by
+  name resolution.
+
 ## 2.5.1
 
 Consolidation release closing the spatial suite (session S8). One line of new

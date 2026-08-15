@@ -134,7 +134,9 @@
 import { measureOps, checkNoGc } from '@zakkster/lite-gc-profiler';
 import { createLeakTracker } from '@zakkster/lite-leak';
 import { LiteAudio } from '../Audio.js';
-import { createMockContext, mockFetch, mockDocument, mockScheduler, flushMicrotasks } from './mock-ctx.js';
+import {
+    createMockContext, mockFetch, mockDocument, mockScheduler, flushMicrotasks, mockAudioElement,
+} from './mock-ctx.js';
 
 // --- config ------------------------------------------------------------------
 
@@ -400,6 +402,30 @@ const SP8_PRESETS = [
     ['width', { width: 0.5 }],
     ['discrete', { spatial: 'discrete', preset: '7.1' }],
 ];
+
+// --- PS5 reloadTrack config (T-TRK1) ------------------------------------------
+
+// T-TRK1: torture.mjs has NEVER exercised defineTracks/reloadTrack before this
+// tier (0 hits) -- it builds the first track fixture in this file. reloadTrack
+// tears a track's <audio> element + graph down destroy()-style and re-enters
+// _loadTrack with a FRESH element (decisions/0014 D4/D5), so the retention
+// witness here is per-ELEMENT, not per-bus: each cycle's OLD element must be
+// released (removeAttribute('src')+load() witnessed, 0 residual timeupdate/
+// ended listeners, its graph nodes disconnected) before the tracker untracks
+// it, exactly one fresh element built per cycle (A2). A separate one-off phase
+// proves the A4 wire-failure recovery (a track dumped to 'error' by a REAL
+// throwing createMediaElementSource reaches 'ready' with a fresh element), and
+// signal identity (A1) is checked every cycle of the retention loop, not just
+// spot-checked. The red control (LITEAUDIO_TORTURE_TRK1_RED) swaps in a
+// reloadTrack that skips the element-release + disconnect + null-out (steps
+// 2-4 of the teardown contract) while still firing _loadTrack, so the old
+// element/nodes are silently abandoned each cycle -- the tracker witness must
+// then grow and the gate must reject.
+const TRK1_CYCLES = 10_000;      // ~1e4 force-error -> reloadTrack cycles (A2)
+const TRK1_GC_CYCLES = 2_000;    // GC-budget window (a fresh, heavier per-op cost
+                                  // than the handle/scratch tiers -- real element +
+                                  // gain-node construction -- so a smaller window)
+const TRK1_RED = process.env.LITEAUDIO_TORTURE_TRK1_RED === '1';
 
 const LEAK = process.env.LITEAUDIO_TORTURE_LEAK === '1';
 const SP1_RED = process.env.LITEAUDIO_TORTURE_SP1_RED === '1';
@@ -941,6 +967,94 @@ function redMonitorIdleNoAutoSuspend() {
         if (busRec.wideIn !== null) return false;
         if (busRec.pool !== null && busRec.posDirty !== null) return false;
     }
+    return true;
+}
+
+// --- PS5 reloadTrack fixture + red control (T-TRK1) ---------------------------
+
+/**
+ * A context that records createMediaElementSource calls and, when
+ * `throwOnReuse` is set, enforces the spec's one-source-per-element rule by
+ * throwing InvalidStateError on a re-used element -- mirrors
+ * test/Tracks.test.js's sourceTrackingCtx (the wire-failure mock T9 was told
+ * to reuse) and test/ReloadTrack.test.js's copy of the same pattern.
+ */
+function trkSourceTrackingCtx({ throwOnReuse = false } = {}) {
+    const ctx = createMockContext({ state: 'running' });
+    const sourced = new Set();
+    const orig = ctx.createMediaElementSource;
+    ctx.createMediaElementSource = (el) => {
+        if (throwOnReuse && sourced.has(el)) {
+            const e = new Error('createMediaElementSource: element already connected');
+            e.name = 'InvalidStateError';
+            throw e;
+        }
+        sourced.add(el);
+        return orig(el);
+    };
+    return ctx;
+}
+
+/**
+ * A document whose FIRST created <audio> is the caller-supplied (pre-spent)
+ * element; every createElement call after that mints a brand-new one via the
+ * ordinary mockAudioElement factory (which itself is the "records created +
+ * released elements" fixture T9 asked for: el.srcReleased/el.loadCalls/
+ * el._listenerCount are the release witness read below). Models a host that
+ * handed lite-audio one already-sourced element once (the A4 wire-failure
+ * seed), then mints fresh ones normally -- exactly what proves reloadTrack's
+ * escape from the one-MediaElementSource-per-element trap (D4).
+ */
+function trkPoisonedThenFreshDocument(spentEl) {
+    const created = [];
+    let first = true;
+    return {
+        hidden: false,
+        created,
+        createElement(tag) {
+            if (tag !== 'audio') throw new Error('trkPoisonedThenFreshDocument: unexpected <' + tag + '>');
+            if (first) { first = false; created.push(spentEl); return spentEl; }
+            const el = mockAudioElement();
+            created.push(el);
+            return el;
+        },
+        addEventListener() {},
+        removeEventListener() {},
+    };
+}
+
+/**
+ * The T-TRK1 red control: a reloadTrack that keeps the exact same fail-closed
+ * precondition guards (D1/D2) but SKIPS steps 2-4 of the teardown contract --
+ * the element release (no removeAttribute('src')/load(), no timeupdate/ended
+ * listener removal), the graph disconnect, and the null-out of the rebuildable
+ * rec fields -- while still firing _loadTrack so the state machine keeps
+ * advancing (loading -> ready/error) exactly as the real method does. The old
+ * element/nodes are silently abandoned each cycle: this is the actual
+ * regression the guarded release in decisions/0014 D5/D7 exists to prevent.
+ * Bound onto the instance (`this`) in place of the real method before the
+ * retention loop runs.
+ */
+function redReloadTrack(name) {
+    if (this._destroyed) throw new Error('LiteAudio: destroyed');
+    if (!this._initialized) throw new Error('LiteAudio: init() before reloadTrack()');
+    if (typeof name !== 'string' || name.length === 0) return false;
+    const rec = this._tracks.get(name);
+    if (!rec) return false;
+    const state = rec.loadState.peek();
+    if (state === 'loading') return false;
+    if (rec.playing.peek()) return false;
+    if (state !== 'error' && state !== 'idle') return false;
+
+    // RED: no element.pause()/removeAttribute('src')/load(), no listener
+    // removal, no source/xfadeGain/volumeGain.disconnect(), no null-out --
+    // the spent element and its graph nodes are simply dropped, still wired,
+    // still holding their src and listeners, while rec.element is overwritten
+    // by the fresh one _loadTrack builds.
+    rec.playing.set(false);
+    rec.position.set(0);
+    rec.duration.set(0);
+    this._loadTrack(rec);
     return true;
 }
 
@@ -2292,6 +2406,204 @@ async function main() {
     if (sp8GLiveDelta !== 0) die('T-SP8 (g): live-node census delta ' + sp8GLiveDelta + ' after ' + SP8G_CYCLES + ' cycles (expected 0).');
     sp8GD.audio.destroy();
 
+    // 15) T-TRK1 (PS5): reloadTrack(name) -- error-state recovery for ONE music
+    //     track, without a full defineTracks rebuild (decisions/0014). This is the
+    //     FIRST torture tier to exercise defineTracks/reloadTrack at all (0 hits
+    //     before this). Three things need proving: (a) A4 -- a track dumped to
+    //     'error' by a REAL wire failure (a spent <audio> element re-sourced via a
+    //     throwing createMediaElementSource) reaches 'ready' after reloadTrack via
+    //     a FRESH element, escaping the one-MediaElementSource-per-element trap;
+    //     (b) A2/A1 -- a TRK1_CYCLES-cycle force-error/reloadTrack retention loop
+    //     ends with the lite-leak witness at 0 (each cycle's spent element fully
+    //     released -- src dropped, load() called, 0 residual timeupdate/ended
+    //     listeners, its graph nodes disconnected -- before the tracker untracks
+    //     it), exactly one new element per cycle, and the four external signal
+    //     objects holding IDENTITY (===) across EVERY cycle, not just a spot
+    //     check; (c) a GC-budget window over the same churn holds maxMajor:0/
+    //     maxPauseMs<=4 (bytesPerOp is NOT gated -- a fresh element+graph per
+    //     cycle is allocation BY DESIGN, D4). The red control (TRK1_RED) swaps in
+    //     a reloadTrack that skips the release/disconnect/null-out, so the
+    //     tracker witness must grow and the gate must reject.
+
+    //     (a) A4: wire-failure recovery.
+    const trkWin = {
+        navigator: { userAgent: 'node-torture-gate', maxTouchPoints: 0 },
+        addEventListener: () => {}, removeEventListener: () => {},
+    };
+    const trkACtx = trkSourceTrackingCtx({ throwOnReuse: true });
+    const trkASpentEl = mockAudioElement();
+    trkACtx.createMediaElementSource(trkASpentEl);   // pre-poison: an earlier session already sourced this element
+    const trkADoc = trkPoisonedThenFreshDocument(trkASpentEl);
+    const trkAAudio = new LiteAudio({
+        buses: ['music'], poolCapacity: 4, window: trkWin, document: trkADoc, fetch: mockFetch({}),
+        setTimeout: () => 0, clearTimeout: () => {},
+    });
+    await trkAAudio.init(trkACtx);
+    await trkAAudio.defineTracks({ theme: { src: ['/theme.mp3'], bus: 'music' } });
+    if (trkAAudio.trackLoadState('theme').peek() !== 'ready') {
+        die('T-TRK1 (a): setup -- load did not settle ready before the wire-failure play.');
+    }
+    if (trkAAudio._tracks.get('theme').element !== trkASpentEl) {
+        die('T-TRK1 (a): setup -- the poisoned document did not hand back the pre-spent element first.');
+    }
+    trkAAudio.playTrack('theme');   // first wire attempt: throws inside _wireTrackGraph -> caught -> 'error'
+    if (trkAAudio.trackLoadState('theme').peek() !== 'error') {
+        die('T-TRK1 (a): setup -- the wire failure did not fail the track closed to \'error\'.');
+    }
+    const trkALoadStateBefore = trkAAudio.trackLoadState('theme');
+    const trkAReloaded = trkAAudio.reloadTrack('theme');
+    if (trkAReloaded !== true) die('T-TRK1 (a): reloadTrack on the wire-failed track returned ' + trkAReloaded + ' (expected true).');
+    const trkAFreshEl = trkAAudio._tracks.get('theme').element;
+    if (trkAFreshEl === trkASpentEl) die('T-TRK1 (a): reloadTrack reused the spent element instead of building a fresh one.');
+    if (trkAAudio.trackLoadState('theme').peek() !== 'ready') {
+        die('T-TRK1 (a): the fresh element did not reach \'ready\' (still trapped by the spent element).');
+    }
+    if (trkAAudio.trackLoadState('theme') !== trkALoadStateBefore) {
+        die('T-TRK1 (a): loadState signal identity changed across reload (A1).');
+    }
+    trkAAudio.playTrack('theme');   // prove the fresh element really wires and plays
+    if (trkAAudio.trackLoadState('theme').peek() !== 'ready' || trkAAudio.trackPlaying('theme').peek() !== true) {
+        die('T-TRK1 (a): the fresh element did not wire and play after reload.');
+    }
+    process.stderr.write('T-TRK1 (a) wire-failure recovery: a spent element failed the track closed to \'error\', ' +
+        'reloadTrack built a fresh element (doc.created=' + trkADoc.created.length + '), reached \'ready\', signal ' +
+        'identity held, and the fresh element played (A4)\n');
+    trkAAudio.destroy();
+
+    //     (b) A2/A1: TRK1_CYCLES-cycle force-error/reloadTrack retention loop.
+    const trkCtx = createMockContext({ state: 'running' });
+    const trkDoc = mockDocument();
+    const trkAudio = new LiteAudio({
+        buses: ['music'], poolCapacity: 4, window: trkWin, document: trkDoc,
+        fetch: mockFetch({ '/churn.mp3': 500 }),
+        setTimeout: () => 0, clearTimeout: () => {},
+    });
+    await trkAudio.init(trkCtx);
+    await trkAudio.defineTracks({ churn: { src: ['/churn.mp3'], bus: 'music' } });
+    if (trkAudio.trackLoadState('churn').peek() !== 'ready') die('T-TRK1 (b): setup -- churn track did not load ready.');
+    if (TRK1_RED) trkAudio.reloadTrack = redReloadTrack.bind(trkAudio);
+
+    const trkTracker = createLeakTracker({ name: 'lite-audio-reloadtrack-soak' });
+    const TRK1_NOOP = () => {};
+    const trkKept = [];
+    let trkUndead = 0;
+    const trkSigs = {
+        loadState: trkAudio.trackLoadState('churn'),
+        playing: trkAudio.trackPlaying('churn'),
+        position: trkAudio.trackPosition('churn'),
+        duration: trkAudio.trackDuration('churn'),
+    };
+    let trkIdentityBroken = 0;
+
+    for (let c = 0; c < TRK1_CYCLES; c++) {
+        trkAudio.playTrack('churn');
+        const t = trkAudio._tracks.get('churn');
+        const prevEl = t.element, prevSource = t.source, prevXfade = t.xfadeGain, prevVol = t.volumeGain;
+        trkAudio.stopTrack('churn', { fade: 0 });
+        t.loadState.set('error');
+
+        const sentinel = { cycle: c };
+        trkKept.push(sentinel);
+        const witness = trkTracker.track(sentinel, TRK1_NOOP, c);
+
+        const before = trkDoc.created.length;
+        const reloaded = trkAudio.reloadTrack('churn');
+        if (reloaded !== true) die('T-TRK1 (b): cycle ' + c + ' -- reloadTrack returned ' + reloaded + ' (expected true).');
+        if (trkDoc.created.length !== before + 1) {
+            die('T-TRK1 (b): cycle ' + c + ' -- created ' + (trkDoc.created.length - before) +
+                ' element(s), expected exactly 1.');
+        }
+
+        const released = prevEl.srcReleased && prevEl.loadCalls > 0 &&
+            prevEl._listenerCount('timeupdate') === 0 && prevEl._listenerCount('ended') === 0 &&
+            (!prevSource || prevSource.disconnected >= 1) &&
+            (!prevXfade || prevXfade.disconnected >= 1) &&
+            (!prevVol || prevVol.disconnected >= 1);
+        if (released) { trkTracker.untrack(witness); } else { trkUndead++; }
+
+        if (trkAudio.trackLoadState('churn') !== trkSigs.loadState ||
+            trkAudio.trackPlaying('churn') !== trkSigs.playing ||
+            trkAudio.trackPosition('churn') !== trkSigs.position ||
+            trkAudio.trackDuration('churn') !== trkSigs.duration) {
+            trkIdentityBroken++;
+        }
+        if (trkAudio.trackLoadState('churn').peek() !== 'ready') {
+            die('T-TRK1 (b): cycle ' + c + ' -- did not settle \'ready\' after reload.');
+        }
+    }
+    if (trkKept.length !== TRK1_CYCLES) die('T-TRK1: internal -- pinned ' + trkKept.length + ' of ' + TRK1_CYCLES);
+    const trkLeaked = trkTracker.size();
+    const trkLiveElements = trkDoc.created.length - (TRK1_CYCLES - trkUndead);
+
+    process.stderr.write('T-TRK1 (b) retention: ' + TRK1_CYCLES + ' force-error/reloadTrack cycles' +
+        (TRK1_RED ? ' (RED: release/disconnect/null-out skipped)' : '') + ' -- lite-leak witnessed ' + trkLeaked +
+        ' un-released element(s), ' + trkUndead + ' incomplete release(s), ' + trkIdentityBroken +
+        ' signal-identity break(s), doc.created=' + trkDoc.created.length + ' (expected ' + (TRK1_CYCLES + 1) +
+        ': one initial + one per cycle) (all expected 0 except doc.created)\n');
+
+    if (TRK1_RED) {
+        if (trkLeaked === 0 && trkUndead === 0) {
+            die('LITEAUDIO_TORTURE_TRK1_RED: the release-skipping reloadTrack left the witness clean -- the red ' +
+                'control is no longer modelling the leak it claims and cannot prove this gate is falsifiable.');
+        }
+        die('LITEAUDIO_TORTURE_TRK1_RED: reloadTrack skipped the element release + graph disconnect + null-out, ' +
+            'so ' + trkUndead + '/' + TRK1_CYCLES + ' spent element(s)/node(s) were never released (lite-leak ' +
+            'witnessed ' + trkLeaked + ') -- rejecting as designed. This is the red control; a clean run does not ' +
+            'take this branch.');
+    }
+    if (trkUndead !== 0) {
+        die('T-TRK1: ' + trkUndead + ' cycle(s) left their spent element/graph nodes un-released -- reloadTrack ' +
+            'must removeAttribute(\'src\')+load() the old element, remove its timeupdate/ended listeners, and ' +
+            'disconnect source/xfadeGain/volumeGain before the next cycle\'s fresh element is built.');
+    }
+    if (trkLeaked !== 0) {
+        die('T-TRK1: lite-leak witnessed ' + trkLeaked + ' un-released element(s)/node(s) after ' + TRK1_CYCLES +
+            ' cycles -- a teardown leak the bytesPerOp gate cannot see.');
+    }
+    if (trkIdentityBroken !== 0) {
+        die('T-TRK1: loadState/playing/position/duration signal identity changed on ' + trkIdentityBroken +
+            ' of ' + TRK1_CYCLES + ' cycles (A1) -- reloadTrack must reuse the four signals, never dispose+recreate.');
+    }
+    if (trkLiveElements !== 1) {
+        die('T-TRK1: ' + trkLiveElements + ' live element(s) at the end of the soak (expected exactly 1, the ' +
+            'current one) -- created/released bookkeeping does not balance.');
+    }
+    trkAudio.destroy();
+
+    //     (c) GC budget over a fresh, smaller churn window (real element + gain-node
+    //         construction is heavier than the scratch/handle tiers, so a smaller
+    //         window than TRK1_CYCLES). bytesPerOp is NOT gated -- reloadTrack is a
+    //         cold, intentionally-allocating recovery path (a fresh element + graph
+    //         every cycle by design, D4) -- only maxMajor:0/maxPauseMs<=4 are.
+    const trkGcCtx = createMockContext({ state: 'running' });
+    const trkGcAudio = new LiteAudio({
+        buses: ['music'], poolCapacity: 4, window: trkWin, document: mockDocument(),
+        fetch: mockFetch({ '/g.mp3': 500 }),
+        setTimeout: () => 0, clearTimeout: () => {},
+    });
+    await trkGcAudio.init(trkGcCtx);
+    await trkGcAudio.defineTracks({ gchurn: { src: ['/g.mp3'], bus: 'music' } });
+    const trkGcRec = trkGcAudio._tracks.get('gchurn');
+    const trkGcRow = (() => {
+        const r = measureOps(() => {
+            trkGcAudio.playTrack('gchurn');
+            trkGcAudio.stopTrack('gchurn', { fade: 0 });
+            trkGcRec.loadState.set('error');
+            trkGcAudio.reloadTrack('gchurn');
+        }, { ops: TRK1_GC_CYCLES, warmup: 200, source: 'gc', stabilize: true });
+        return { summary: r.summary, noMajor: checkNoGc(r.summary, RULES).ok, bpo: r.bytesPerOp };
+    })();
+    process.stderr.write('T-TRK1 (c) GC budget (' + TRK1_GC_CYCLES + ' play/stop/error/reload cycles): ' +
+        'gc major=' + trkGcRow.summary.gc.major + ' minor=' + trkGcRow.summary.gc.minor +
+        ' maxMs=' + trkGcRow.summary.gc.maxMs.toFixed(2) + ' (' +
+        (Number.isFinite(trkGcRow.bpo) ? trkGcRow.bpo.toFixed(0) : 'null') + ' B/op, not gated -- a fresh ' +
+        'element+graph per cycle is allocation BY DESIGN)\n');
+    if (!trkGcRow.noMajor) {
+        die('T-TRK1: the reloadTrack churn violated ' + JSON.stringify(RULES) + ' (major=' +
+            trkGcRow.summary.gc.major + ', maxMs=' + trkGcRow.summary.gc.maxMs.toFixed(2) + ').');
+    }
+    trkGcAudio.destroy();
+
     process.stderr.write(
         'result: boxed-double handle (bus>=1, gen>8388608) is below the gate resolution; ' +
         'plain-number handle keeps its zero-retain property (decisions/0001). The v1.2.0 ' +
@@ -2322,7 +2634,12 @@ async function main() {
         'cold predicate itself holds zero retained allocation over ' + SP8_OPS + ' calls (T-SP8). ' +
         'PS4: removeDuckRule empties the last duck consumer and the very next tick sleeps the monitor ' +
         '(monitorTimer=null, pending=0, tick counter frozen), released clean with a flat live-node delta across ' +
-        SP8G_CYCLES + ' duckOn/removeDuckRule cycles, each exercising the stranded-target recovery write (T-SP8g).\n');
+        SP8G_CYCLES + ' duckOn/removeDuckRule cycles, each exercising the stranded-target recovery write (T-SP8g). ' +
+        'PS5: reloadTrack(name) recovers ONE errored/idle music track without a full defineTracks rebuild -- a ' +
+        'wire-failed spent element reaches \'ready\' behind a fresh element (A4), and a ' + TRK1_CYCLES +
+        '-cycle force-error/reloadTrack soak releases every spent element/graph node (lite-leak witness 0, exactly ' +
+        'one fresh element per cycle) while the four external signals hold object identity across every cycle, ' +
+        'not just a spot check (A1/A2), under maxMajor:0/maxPauseMs<=4 (T-TRK1).\n');
     process.stdout.write('ok\n');
     process.exit(0);
 }

@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.10.0
+
+Added `reloadTrack(name)` (post-suite backlog PS5): scoped error-state recovery
+for ONE music track without a full `defineTracks` rebuild (`defineTracks` skips an
+already-defined name). It tears the track's graph + `<audio>` element down
+destroy()-style (cancel `pauseTimer`, remove the `timeupdate`/`ended` handlers,
+`pause()` + `removeAttribute('src')` + `load()` to release the stream, disconnect
+`source`/`xfadeGain`/`volumeGain`, null every rebuildable field) and re-enters
+`_loadTrack` with a FRESH element via `_createAudioElement` -- the only escape from
+the one-MediaElementSource-per-element-forever constraint (a second
+`createMediaElementSource` on a spent element throws), so a wire-failure that
+dumped a track to `'error'` can only be recovered by a new element. The teardown
+fully releases the old element BEFORE the new one is built, so no two
+elements/sources coexist. The four external signals (`loadState`/`playing`/
+`position`/`duration`) are REUSED, `.set()` only, NEVER disposed -- the track's
+stable external identity, so a subscribed HUD keeps its bindings (the deliberate
+divergence from `destroy()`). Returns a `boolean` SYNC: the async recovery channel
+is the `loadState` signal watched via `trackLoadState(name)`, so `_loadTrack` is
+fired but not awaited. Fail-closed `false` (rec untouched) on unknown / null /
+non-string name, or a `loading` / `playing` / `ready` track -- reload fires only
+from `error` / `idle` and not playing (recovers an errored track, does not restart
+a healthy one). Throws on a destroyed / uninitialized engine. Touches only the one
+rec (identity preserved). NO hot-path or behavior change to `play()`, `stop()`,
+`setPosition()`, `_evalDuckRules()`, or `_monitorIdle()`; both `HashParity`
+goldens frozen. See `decisions/0014-reload-track.md`.
+
+### Added
+
+- `reloadTrack(name) -> boolean` -- recover an errored track without a
+  `defineTracks` rebuild by tearing its graph + `<audio>` element down and
+  rebuilding with a fresh element; the four signals are reused so live
+  subscriptions survive. Cold, off every hot path.
+
 ## 2.9.0
 
 Added `removeDuckRule(triggerBus, targetBus)` (post-suite backlog PS4): the

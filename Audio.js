@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.9.0';
+export const VERSION = '2.10.0';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -1434,6 +1434,114 @@ export class LiteAudio {
             loadPromises.push(this._loadTrack(rec));
         }
         await Promise.all(loadPromises);
+    }
+
+    /**
+     * Recover ONE errored music track without a full defineTracks rebuild.
+     *
+     * defineTracks is a no-op for an already-defined name (it does
+     * `if (this._tracks.has(name)) continue;`), so once a track's load has
+     * settled to 'error' there is no built-in path back. reloadTrack is that
+     * path: it tears the track's graph + <audio> element down destroy()-style
+     * and re-enters _loadTrack with a FRESH element, driving loadState back
+     * through idle -> loading -> ready (or 'error' again). It is the symmetric
+     * per-track recovery counterpart to defineTracks' per-track load, and it is
+     * a cold call off every hot path.
+     *
+     * A fresh element is mandatory, not a convenience: a given <audio> element
+     * can back exactly ONE MediaElementAudioSourceNode for its lifetime (a
+     * second createMediaElementSource on the same element throws
+     * InvalidStateError - see _wireTrackGraph). A wire-failure that dumped the
+     * track to 'error' has spent that element forever; only a new one can
+     * recover it, so the teardown fully releases the old element BEFORE
+     * _loadTrack builds the new one - no two elements/sources ever coexist.
+     * (The old element's own loadedmetadata/error listeners are not tracked on
+     * the rec, but after removeAttribute('src')+load() and nulling rec.element
+     * they form an unreferenced island - GC-eligible, not a leak.)
+     *
+     * The four external signals (loadState / playing / position / duration) are
+     * REUSED, never disposed: they are the track's stable external identity, so
+     * a subscribed HUD keeps its bindings across the reload. This is the
+     * deliberate divergence from destroy(), which DOES dispose them.
+     *
+     * Returns a boolean SYNC. The async recovery channel is the loadState
+     * signal the caller already watches via trackLoadState(name); _loadTrack is
+     * fired but NOT awaited, so the graph is not yet settled on return.
+     *
+     * No-op (returns false, rec untouched) on: unknown / null / non-string
+     * name, an in-flight load ('loading'), a live-playback track ('playing'),
+     * or a healthy 'ready' track (reload RECOVERS an errored track, it does not
+     * restart a healthy one - playTrack({restart:true}) owns restart). Reload
+     * fires only from {'error','idle'} with the track not playing. Throws on a
+     * destroyed / uninitialized engine, matching defineTracks.
+     *
+     * @param {string} name
+     * @returns {boolean} true iff a teardown + reload was fired.
+     */
+    reloadTrack(name) {
+        if (this._destroyed) throw new Error('LiteAudio: destroyed');
+        if (!this._initialized) throw new Error('LiteAudio: init() before reloadTrack()');
+
+        if (typeof name !== 'string' || name.length === 0) return false;
+        const rec = this._tracks.get(name);
+        if (!rec) return false;
+
+        // Fail closed: reload only recovers an errored/idle track that is not
+        // live. A loading track races the in-flight _loadTrack (also guards
+        // reentrancy - a second reloadTrack mid-load is refused here, so no
+        // double element build). A playing track has a live graph mid-playback.
+        // A ready track has nothing to recover.
+        const state = rec.loadState.peek();
+        if (state === 'loading') return false;
+        if (rec.playing.peek()) return false;
+        if (state !== 'error' && state !== 'idle') return false;
+
+        // Teardown, mirroring destroy()'s per-track block - but WITHOUT disposing
+        // the signals. All node ops are guarded: after a wire failure the element
+        // and gains may be null or foreign.
+        if (rec.pauseTimer != null) { this._clearTimeout(rec.pauseTimer); rec.pauseTimer = null; }
+        if (rec.element) {
+            if (rec.timeupdateHandler) {
+                try { rec.element.removeEventListener('timeupdate', rec.timeupdateHandler); } catch {}
+            }
+            if (rec.endedHandler) {
+                try { rec.element.removeEventListener('ended', rec.endedHandler); } catch {}
+            }
+            try { rec.element.pause(); } catch {}
+            // Drop the stream so a spent element stops buffering and is
+            // GC-eligible, and release it fully BEFORE _loadTrack builds the new
+            // element - no two elements/sources coexist for this track.
+            try {
+                rec.element.removeAttribute('src');
+                rec.element.load();
+            } catch {}
+        }
+        try { rec.source?.disconnect(); } catch {}
+        try { rec.xfadeGain?.disconnect(); } catch {}
+        try { rec.volumeGain?.disconnect(); } catch {}
+
+        // Null every rebuildable field so a reload-churn loop retains no spent
+        // element/nodes; config fields (name/srcs/busName/volume/loop/loopStart/
+        // loopEnd) are preserved so the reload re-uses the original definition.
+        rec.element = null;
+        rec.source = null;
+        rec.xfadeGain = null;
+        rec.volumeGain = null;
+        rec.timeupdateHandler = null;
+        rec.endedHandler = null;
+        rec.resolvedSrc = null;
+        rec.lastPositionWrite = -Infinity;
+        rec.pauseTimer = null;
+
+        // Signals: .set() only, never dispose(). loadState is reset by the
+        // re-entered _loadTrack ('loading' -> 'ready'/'error').
+        rec.playing.set(false);
+        rec.position.set(0);
+        rec.duration.set(0);
+
+        // Fire the fresh load - not awaited; loadState is the async channel.
+        this._loadTrack(rec);
+        return true;
     }
 
     /**

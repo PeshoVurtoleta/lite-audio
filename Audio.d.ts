@@ -294,6 +294,20 @@ export class LiteAudio {
     defineTracks(config: Record<string, TrackConfig>): Promise<void>;
 
     /**
+     * Recover ONE errored track without a full defineTracks rebuild. Tears the
+     * track's graph + <audio> element down and re-enters the loader with a
+     * FRESH element (the only escape from the one-MediaElementSource-per-element
+     * constraint), driving loadState back through loading -> ready | error. The
+     * four signals (loadState / playing / position / duration) are REUSED, never
+     * disposed, so live subscriptions survive the reload. Returns a boolean
+     * SYNC; the async recovery channel is the loadState signal watched via
+     * trackLoadState(name). No-op (false) on unknown / null / non-string name,
+     * a loading / playing / ready track; reload fires only from error / idle.
+     * Throws on a destroyed or uninitialized engine.
+     */
+    reloadTrack(name: string): boolean;
+
+    /**
      * Start (or resume) a track. Idempotent per name unless `restart: true`.
      * Silent no-op if the context is locked or the track is not ready.
      */

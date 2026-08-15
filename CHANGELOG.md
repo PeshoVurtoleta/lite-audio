@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.7.0
+
+Monitor idle refcount / sleep-wake (post-suite backlog PS2). The shared ~10 Hz
+monitor now SLEEPS -- it stops rescheduling itself -- when no consumer is live,
+and WAKES on the next registration. NO hot-path or behavior change to `play()`,
+`stop()`, `setPosition()`, or the tick's flush order; both `HashParity` goldens
+(`play()`, `stop()`) are frozen.
+
+### Changed
+
+- The monitor tick reads a new cold, allocation-free `_monitorIdle()` predicate at
+  its tail and skips the reschedule when idle. "Idle" means: `_meteredBuses`,
+  `_discreteBuses`, and `_duckRules` are empty; auto-suspend is not counting down
+  (`!(_autoSuspend && !_selfSuspended)`); and one indexed scan of `_busList` finds
+  no live positional (`pool !== null && posDirty !== null`), width (`wideIn !==
+  null`), or pending-HRIR-prewarm (`hrtfWarmHandle !== null`) bus. Each `_busList`
+  clause is the literal negation of its walker's own skip line, so the predicate
+  and the walker can never disagree; `busRec.positional` is deliberately NOT read
+  because `destroyBus` never clears it (a tombstone husk would pin the monitor
+  awake forever). Fail closed toward AWAKE: any unverified state keeps ticking.
+  The sleep needs no unwind -- the tick already nulled `_monitorTimer` at its head,
+  so a slept monitor is simply `_monitorTimer === null` with no pending id, and
+  `destroy()` / `_startMonitor` both guard on that field (no double-free, no
+  double-arm). Every registration site re-arms via the existing
+  `if (this._monitorTimer != null) return;` guard.
+
+### Internal wake fixes
+
+- Pool build now calls `_startMonitor()` after allocating the positional/discrete
+  scratch. The `createBus`-time arm fires before that scratch exists, so a
+  positional/discrete bus created before `defineSounds` would otherwise sleep and
+  never flush its positions.
+- `_wakeFromAutoSuspend` now calls `_startMonitor()` immediately after clearing
+  `_selfSuspended` and BEFORE the context/`resume` guard, so a context lacking
+  `resume` still re-arms the monitor (fail-closed ordering; silence tracking cannot
+  be left permanently dead).
+
+See decisions/0011. Both `HashParity` goldens frozen; the hot bodies are
+byte-unchanged.
+
 ## 2.6.0
 
 Dynamic-bus teardown (post-suite backlog PS1). Adds one public cold-path method,

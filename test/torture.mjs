@@ -92,6 +92,27 @@
  * the steady-state tick holds zero retained allocation. That is the AU1
  * assertion "the extended gate stays green with all four features active."
  *
+ * PS2 EXTENSION -- the monitor sleeps at zero consumers, wakes on the next one
+ *
+ * v2.7.0 adds _monitorIdle(), a cold predicate read at the tick tail that skips
+ * the reschedule when NO consumer (metered/discrete/duck/auto-suspend/positional/
+ * width/HRIR-prewarm) is live, so a long-lived app that churns dynamic buses down
+ * to zero stops paying for a ~10 Hz timer that does nothing. T-SP8 builds an idle
+ * engine on a REAL mockScheduler (a no-op timer would make the scheduling subject
+ * vacuous) and proves: (a) the tick keeps firing with a live consumer of every
+ * removable type; (b) it sleeps -- stops rescheduling -- the instant the last one
+ * is destroyed, and stays frozen across further flushes; (c) the next registration
+ * wakes it; (d) a 4096-cycle create-consumer/tick/destroy/tick-to-sleep/wake soak
+ * releases every witness and ends with zero pending timers; (e) a LIVE auto-suspend
+ * countdown is never allowed to sleep out from under itself -- the monitor stays
+ * armed on every tick until the countdown matures, sleeps the instant it
+ * self-suspends (ruling 3b), and play() (T4) wakes it back up; (f) the predicate
+ * itself holds zero retained allocation over 500k calls on a 4-bus engine.
+ *
+ *     LITEAUDIO_TORTURE_SP8_RED=1  -- a predicate that OMITS the auto-suspend
+ *                                     clause, so the monitor sleeps mid-countdown
+ *                                     and the context is never suspended
+ *
  * Peers are devDependencies, never runtime deps: Audio.js has zero deps.
  *
  * @license MIT
@@ -100,7 +121,7 @@
 import { measureOps, checkNoGc } from '@zakkster/lite-gc-profiler';
 import { createLeakTracker } from '@zakkster/lite-leak';
 import { LiteAudio } from '../Audio.js';
-import { createMockContext, mockFetch, mockDocument, flushMicrotasks } from './mock-ctx.js';
+import { createMockContext, mockFetch, mockDocument, mockScheduler, flushMicrotasks } from './mock-ctx.js';
 
 // --- config ------------------------------------------------------------------
 
@@ -349,6 +370,24 @@ const SP7_PRESETS = [
     ['discrete', { spatial: 'discrete', preset: '7.1' }],
 ];
 
+// --- PS2 monitor-idle config (T-SP8) ------------------------------------------
+
+// T-SP8: the shared monitor sleeps -- stops rescheduling -- at zero live
+// consumers and wakes on the next registration. Phase (d) churn presets are
+// restricted to consumer types that register LIVE at createBus() itself (meter/
+// discrete/width), not 'positional' -- a positional bus needs its pool BUILT
+// (defineSounds) before it counts as a consumer (the T3 trap), and building 4096
+// pools would only slow the soak without adding coverage: T3's pool-build wake is
+// separately locked by MonitorIdle.test.js case 15 and phase (a) below.
+const SP8_CYCLES = 4096;         // create-consumer/tick/destroy/tick-to-sleep cycles
+const SP8_OPS = 500_000;         // _monitorIdle() allocation-measurement ops
+const SP8_MAX_BYTES_PER_OP = 0.05;  // tight ceiling: the predicate does no setTargetAtTime
+const SP8_PRESETS = [
+    ['meter', { meter: true }],
+    ['width', { width: 0.5 }],
+    ['discrete', { spatial: 'discrete', preset: '7.1' }],
+];
+
 const LEAK = process.env.LITEAUDIO_TORTURE_LEAK === '1';
 const SP1_RED = process.env.LITEAUDIO_TORTURE_SP1_RED === '1';
 const SP2_RED = process.env.LITEAUDIO_TORTURE_SP2_RED === '1';
@@ -380,6 +419,14 @@ const SP3_RATE_RED = process.env.LITEAUDIO_TORTURE_SP3_RATE_RED === '1';
 // returns to baseline. The census assertion (delta 0) then catches it FOR THE
 // ACTUAL REASON (a leaked live node riding the husk), and the gate must exit 1.
 const DESTROYBUS_RED = process.env.LITEAUDIO_TORTURE_DESTROYBUS_RED === '1';
+// PS2 red control. SP8_RED swaps in a _monitorIdle() that OMITS the auto-suspend
+// clause (`if (this._autoSuspend && !this._selfSuspended) return false;`). With
+// auto-suspend armed and counting down and no other consumer, the monitor sleeps
+// mid-countdown, _evalAutoSuspend never runs again (it is only reached from the
+// tick this predicate would have kept alive), _silentSince never matures, and the
+// context is NEVER suspended -- phase (e) then observes isAutoSuspended() stuck at
+// false and the gate must exit non-zero.
+const SP8_RED = process.env.LITEAUDIO_TORTURE_SP8_RED === '1';
 
 // --- helpers -----------------------------------------------------------------
 
@@ -828,6 +875,59 @@ function redDestroyBus(audio, name) {
     audio._buses.delete(name);
     audio._soundsByBus.delete(name);
     busRec.dead = true;                  // tombstoned by name, but pool + list untouched
+    return true;
+}
+
+// --- PS2 idle-monitor engine builder + red predicate --------------------------
+
+/**
+ * Build a live LiteAudio wired to a REAL mockScheduler (test/mock-ctx.js) --
+ * T-SP8's entire subject is the scheduling, so a no-op `setTimeout: () => 0`
+ * (every other builder in this file) would make the tier vacuous. The context
+ * starts 'running' so init() marks it unlocked immediately (no gesture plumbing
+ * needed), and the sink supports 8 channels so a discrete bus can be built.
+ * Returns the engine, its context, and the manual clock (setTimeout/flush/pending).
+ */
+async function buildIdleEngine({ buses = [], maxChannelCount = 8, capacity = 4 } = {}) {
+    const ctx = createMockContext({ state: 'running', maxChannelCount });
+    const clock = mockScheduler();
+    const win = {
+        navigator: { userAgent: 'node-torture-gate', maxTouchPoints: 0 },
+        addEventListener: () => {}, removeEventListener: () => {},
+    };
+    const audio = new LiteAudio({
+        buses, poolCapacity: capacity, window: win, document: mockDocument(),
+        fetch: mockFetch({ '/s.wav': 500 }),
+        setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+    });
+    await audio.init(ctx);
+    return { audio, ctx, clock };
+}
+
+/**
+ * The fail-open predicate the SP8_RED control swaps in for _monitorIdle: every
+ * clause of the shipped predicate EXCEPT the C4 auto-suspend line
+ * (`if (this._autoSuspend && !this._selfSuspended) return false;`). Modelling the
+ * regression decisions/0011 names as the bug most likely to actually ship: auto-
+ * suspend is the one consumer with no flat list and no per-bus field, exactly what
+ * an implementer forgets while writing the _busList scan. With auto-suspend armed
+ * and counting down and no other consumer, this predicate reports idle immediately,
+ * the tick stops rescheduling, `_evalAutoSuspend` (only ever reached FROM a running
+ * tick) never runs again, and the context is never suspended.
+ */
+function redMonitorIdleNoAutoSuspend() {
+    if (this._meteredBuses.length !== 0) return false;
+    if (this._discreteBuses.length !== 0) return false;
+    if (this._duckRules.length !== 0) return false;
+    // C4 (the omitted clause) intentionally absent here.
+    const list = this._busList;
+    for (let b = 0; b < list.length; b++) {
+        const busRec = list[b];
+        if (busRec.dead) continue;
+        if (busRec.hrtfWarmHandle !== null) return false;
+        if (busRec.wideIn !== null) return false;
+        if (busRec.pool !== null && busRec.posDirty !== null) return false;
+    }
     return true;
 }
 
@@ -1886,6 +1986,228 @@ async function main() {
     sp7Audio.destroy();
     sp7GcAudio.destroy();
 
+    // 14) T-SP8 (PS2): monitor idle refcount / sleep-wake. The tick evaluates a
+    //     cold _monitorIdle() predicate at its tail and skips the reschedule when
+    //     no consumer is live. This tier is the only one in the file wired to a
+    //     REAL mockScheduler (buildIdleEngine) -- the whole subject here IS the
+    //     scheduling, so a no-op setTimeout would make it vacuous.
+
+    //     (a) awake with a live consumer of every removable type -- metered,
+    //         positional (pool built), discrete, width -- flush() x10: the tick
+    //         keeps firing and never double-arms (pending() stays exactly 1).
+    const sp8 = await buildIdleEngine();
+    sp8.audio.createBus('idleMeter', { meter: true });
+    sp8.audio.createBus('idlePos', { spatial: 'positional' });
+    sp8.audio.createBus('idleDisc', { spatial: 'discrete', preset: '7.1' });
+    sp8.audio.createBus('idleWidth', { width: 0.5 });
+    await sp8.audio.defineSounds({
+        idlePosSnd: { src: ['/s.wav'], bus: 'idlePos' },
+        idleDiscSnd: { src: ['/s.wav'], bus: 'idleDisc' },
+        idleWidthSnd: { src: ['/s.wav'], bus: 'idleWidth' },
+    });
+    await flushMicrotasks(8);
+
+    if (sp8.audio._monitorIdle()) {
+        die('T-SP8 (a): setup -- the engine reports idle with 4 live consumer types armed.');
+    }
+    // Tick counter: _retireHrtfWarm runs FIRST, unconditionally, in every tick
+    // (Audio.js :2381), so wrapping it counts ticks precisely without perturbing
+    // the scheduling it is wrapping.
+    const sp8OrigRetire = sp8.audio._retireHrtfWarm.bind(sp8.audio);
+    let sp8TickCount = 0;
+    sp8.audio._retireHrtfWarm = () => { sp8TickCount++; sp8OrigRetire(); };
+
+    for (let i = 0; i < 10; i++) {
+        sp8.clock.flush();
+        if (sp8.audio._monitorTimer === null) die('T-SP8 (a): the monitor slept at flush ' + i + ' with 4 live consumers.');
+        if (sp8.clock.pending() !== 1) {
+            die('T-SP8 (a): pending()=' + sp8.clock.pending() + ' at flush ' + i + ' (expected exactly 1 -- R3 double-arm guard).');
+        }
+    }
+    if (sp8TickCount !== 10) die('T-SP8 (a): tick counter=' + sp8TickCount + ' after 10 flushes (expected 10).');
+    process.stderr.write('T-SP8 (a) awake with metered+positional+discrete+width live: ' +
+        sp8TickCount + '/10 ticks fired, pending()==1 every flush\n');
+
+    //     (b) sleeps at zero: destroyBus every dynamic consumer + disableAutoSuspend();
+    //         one more flush() -> monitorTimer===null, pending()===0; flush() x10 more
+    //         -> tick counter FROZEN (A3/A4: a slept monitor cannot resurrect itself).
+    sp8.audio.destroyBus('idleMeter');
+    sp8.audio.destroyBus('idlePos');
+    sp8.audio.destroyBus('idleDisc');
+    sp8.audio.destroyBus('idleWidth');
+    sp8.audio.disableAutoSuspend();
+
+    sp8.clock.flush();
+    if (sp8.audio._monitorTimer !== null) die('T-SP8 (b): monitorTimer is not null after the sleep flush.');
+    if (sp8.clock.pending() !== 0) die('T-SP8 (b): pending()=' + sp8.clock.pending() + ' after the sleep flush (expected 0).');
+    const sp8TickAtSleep = sp8TickCount;
+    for (let i = 0; i < 10; i++) sp8.clock.flush();
+    if (sp8TickCount !== sp8TickAtSleep) {
+        die('T-SP8 (b): tick counter moved (' + sp8TickAtSleep + ' -> ' + sp8TickCount + ') across 10 flushes on a ' +
+            'slept monitor -- a slept monitor must not resurrect itself.');
+    }
+    if (sp8.audio._monitorTimer !== null) die('T-SP8 (b): monitorTimer is not null after the frozen flushes.');
+    process.stderr.write('T-SP8 (b) sleeps at zero: monitorTimer=null, pending=0, tick counter frozen at ' +
+        sp8TickCount + ' across 10 further flushes\n');
+
+    //     (c) wakes: createBus('m',{meter:true}) -> monitorTimer!==null immediately,
+    //         ticks resume (A5).
+    sp8.audio.createBus('m', { meter: true });
+    if (sp8.audio._monitorTimer === null) die('T-SP8 (c): monitorTimer is null immediately after createBus (expected an immediate wake).');
+    if (sp8.clock.pending() !== 1) die('T-SP8 (c): pending()=' + sp8.clock.pending() + ' immediately after the wake (expected 1).');
+    const sp8TickAtWake = sp8TickCount;
+    for (let i = 0; i < 3; i++) {
+        sp8.clock.flush();
+        if (sp8.clock.pending() !== 1) die('T-SP8 (c): pending()=' + sp8.clock.pending() + ' at flush ' + i + ' after waking (expected 1).');
+    }
+    if (sp8TickCount - sp8TickAtWake !== 3) {
+        die('T-SP8 (c): tick counter advanced by ' + (sp8TickCount - sp8TickAtWake) + ' over 3 flushes after waking (expected 3).');
+    }
+    process.stderr.write('T-SP8 (c) wakes: createBus re-armed the monitor immediately, ' +
+        (sp8TickCount - sp8TickAtWake) + '/3 ticks resumed\n');
+    sp8.audio.destroy();
+
+    //     (d) census/retention: SP8_CYCLES = 4096 create-consumer -> tick ->
+    //         destroy-consumer -> tick-to-sleep -> wake (next cycle's createBus)
+    //         cycles -> tracker.size()===0, live-node census delta 0, pending()
+    //         ends 0 (A11, mirrors T-SP7's SP7_CYCLES = 4096).
+    const sp8D = await buildIdleEngine();
+    const sp8Tracker = createLeakTracker({ name: 'lite-audio-idle-soak' });
+    const SP8_NOOP = () => {};
+    const sp8Kept = [];
+    let sp8Undead = 0;
+    const sp8Baseline = sp8D.ctx._liveNodes();
+    if (sp8D.audio._monitorTimer !== null) die('T-SP8 (d): setup -- a fresh engine must never be armed.');
+
+    for (let c = 0; c < SP8_CYCLES; c++) {
+        const preset = SP8_PRESETS[c % SP8_PRESETS.length];
+        const bn = 'sp8census' + c;
+        if (sp8D.audio._monitorTimer !== null) {
+            die('T-SP8 (d): cycle ' + c + ' -- monitor was already armed BEFORE createBus (a prior cycle left it awake).');
+        }
+        // create-consumer: the WAKE step for this cycle.
+        const rec = sp8D.audio.createBus(bn, preset[1]);
+        if (sp8D.audio._monitorTimer === null) die('T-SP8 (d): cycle ' + c + ' -- createBus did not wake the monitor.');
+        // tick: the cycle's own consumer is still live, so the monitor must stay armed.
+        sp8D.clock.flush();
+        if (sp8D.audio._monitorTimer === null) {
+            die('T-SP8 (d): cycle ' + c + ' -- the monitor slept while the cycle\'s own consumer was still live.');
+        }
+        const sentinel = { cycle: c };
+        sp8Kept.push(sentinel);
+        const witness = sp8Tracker.track(sentinel, SP8_NOOP, c);
+        // destroy-consumer.
+        const ok = sp8D.audio.destroyBus(bn);
+        if (ok && rec.dead) { sp8Tracker.untrack(witness); } else { sp8Undead++; }
+        // tick-to-sleep: no other consumer survives this cycle, so the very next
+        // tick sleeps -- proving A3/A4's exact-sleep observable on every cycle.
+        sp8D.clock.flush();
+        if (sp8D.audio._monitorTimer !== null) {
+            die('T-SP8 (d): cycle ' + c + ' -- the monitor did not sleep after its only consumer was destroyed.');
+        }
+        if (sp8D.clock.pending() !== 0) die('T-SP8 (d): cycle ' + c + ' -- pending()=' + sp8D.clock.pending() + ' after sleeping (expected 0).');
+    }
+    if (sp8Kept.length !== SP8_CYCLES) die('T-SP8: internal -- pinned ' + sp8Kept.length + ' of ' + SP8_CYCLES);
+    const sp8Leaked = sp8Tracker.size();
+    const sp8AfterLive = sp8D.ctx._liveNodes();
+    const sp8LiveDelta = sp8AfterLive - sp8Baseline;
+    process.stderr.write('T-SP8 (d) census/retention: ' + SP8_CYCLES + ' create/tick/destroy/tick-to-sleep/wake ' +
+        'cycles -- lite-leak witnessed ' + sp8Leaked + ' un-released record(s), ' + sp8Undead + ' incomplete ' +
+        'teardown(s), live-node delta ' + sp8LiveDelta + ', pending()=' + sp8D.clock.pending() + ' (all expected 0)\n');
+    if (sp8Undead !== 0) die('T-SP8: ' + sp8Undead + ' cycle(s) did not leave a hollowed tombstone.');
+    if (sp8Leaked !== 0) die('T-SP8: lite-leak witnessed ' + sp8Leaked + ' un-released record(s) after ' + SP8_CYCLES + ' cycles.');
+    if (sp8LiveDelta !== 0) die('T-SP8: live-node census delta ' + sp8LiveDelta + ' after ' + SP8_CYCLES + ' cycles (expected 0).');
+    if (sp8D.clock.pending() !== 0) die('T-SP8: pending()=' + sp8D.clock.pending() + ' at the end of the census soak (expected 0).');
+    sp8D.audio.destroy();
+
+    //     (e) auto-suspend integrity (A8/A9, the Q5/ruling-3b sharp edge). Auto-
+    //         suspend as the ONLY consumer must stay armed on EVERY tick until the
+    //         countdown matures; it sleeps the instant it self-suspends (D4: sleep
+    //         and self-suspend are decided inside the SAME tick, since
+    //         _evalAutoSuspend sets _selfSuspended synchronously before this same
+    //         tick's own _monitorIdle() check reads it); play() (T4) wakes it again.
+    //         SP8_RED swaps in a predicate that omits the auto-suspend clause: the
+    //         monitor sleeps on the FIRST tick (before the countdown can mature),
+    //         _evalAutoSuspend is never reached again, and isAutoSuspended() never
+    //         becomes true -- the gate must reject.
+    const sp8E = await buildIdleEngine({ buses: ['sfx'] });
+    await sp8E.audio.defineSounds({ ping: { src: ['/s.wav'], bus: 'sfx' } });
+    await flushMicrotasks(8);
+    if (sp8E.audio._monitorTimer !== null) die('T-SP8 (e): setup -- a plain stereo bus must not arm the monitor.');
+
+    if (SP8_RED) sp8E.audio._monitorIdle = redMonitorIdleNoAutoSuspend;
+
+    sp8E.audio.enableAutoSuspend({ after: 0.5 });
+    if (sp8E.audio._monitorTimer === null) die('T-SP8 (e): enableAutoSuspend did not arm the monitor.');
+
+    let sp8Matured = false;
+    for (let i = 0; i < 40 && !sp8Matured; i++) {
+        sp8E.ctx._advance(0.05);
+        sp8E.clock.flush();
+        if (sp8E.audio.isAutoSuspended()) { sp8Matured = true; break; }
+        if (sp8E.audio._monitorTimer === null) {
+            die('T-SP8 (e): the monitor slept at tick ' + i + ' while the auto-suspend countdown was still live ' +
+                '(A8/Q5 -- a live countdown must never sleep out from under itself).' +
+                (SP8_RED ? ' SP8_RED: the auto-suspend clause is missing from _monitorIdle.' : ''));
+        }
+    }
+    if (!sp8Matured) {
+        die('T-SP8 (e): auto-suspend never matured within 40 ticks -- isAutoSuspended() stuck at false' +
+            (SP8_RED ? ' (SP8_RED: the monitor slept mid-countdown, so _evalAutoSuspend never ran again to ' +
+                'mature it -- the context was never suspended).' : '.'));
+    }
+    if (sp8E.audio._monitorTimer !== null) die('T-SP8 (e): the monitor did not sleep on the very tick it self-suspended (ruling 3b).');
+    process.stderr.write('T-SP8 (e) auto-suspend integrity' + (SP8_RED ? ' (RED: auto-suspend clause omitted)' : '') +
+        ': stayed armed through the whole countdown, isAutoSuspended()=' + sp8E.audio.isAutoSuspended() +
+        ', slept the instant it self-suspended\n');
+
+    const sp8Handle = sp8E.audio.play('ping');
+    if (sp8Handle < 0) die('T-SP8 (e): T4 wake setup -- play() returned a skip sentinel.');
+    if (sp8E.audio._selfSuspended !== false) die('T-SP8 (e): play() did not clear _selfSuspended (T4).');
+    if (sp8E.audio._monitorTimer === null) die('T-SP8 (e): play() did not re-arm the monitor from a self-suspended+slept state (T4).');
+    process.stderr.write('T-SP8 (e) T4 wake: play() from self-suspended+slept -> _selfSuspended=false, monitorTimer!=null\n');
+    sp8E.audio.destroy();
+
+    //     (f) allocation: _monitorIdle() over SP8_OPS=500,000 calls on a 4-bus
+    //         engine (1 metered + 1 positional + 1 width + 1 tombstone husk), no
+    //         major GC, <= SP8_MAX_BYTES_PER_OP=0.05 B/op (the tight positional
+    //         ceiling -- the predicate does no setTargetAtTime, so anything above
+    //         noise is an allocation) (A10).
+    const sp8F = await buildIdleEngine();
+    sp8F.audio.createBus('sp8fMeter', { meter: true });
+    sp8F.audio.createBus('sp8fPos', { spatial: 'positional' });
+    sp8F.audio.createBus('sp8fWidth', { width: 0.5 });
+    await sp8F.audio.defineSounds({
+        sp8fPosSnd: { src: ['/s.wav'], bus: 'sp8fPos' },
+        sp8fWidthSnd: { src: ['/s.wav'], bus: 'sp8fWidth' },
+    });
+    await flushMicrotasks(8);
+    sp8F.audio.createBus('sp8fHusk');
+    sp8F.audio.destroyBus('sp8fHusk');
+    if (sp8F.audio._monitorIdle()) die('T-SP8 (f): setup -- the 4-bus measurement engine reports idle.');
+
+    const sp8FRow = (() => {
+        const r = measureOps(() => { sink = sp8F.audio._monitorIdle() ? 1 : 0; },
+            { ops: SP8_OPS, warmup: 50_000, source: 'gc', stabilize: true });
+        const report = checkNoGc(r.summary, RULES);
+        return {
+            label: 'T-SP8:_monitorIdle', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
+        };
+    })();
+    process.stderr.write('T-SP8 (f) _monitorIdle() allocation (' + SP8_OPS +
+        ' calls, 4-bus engine: 1 metered+1 positional+1 width+1 husk):\n');
+    process.stderr.write(fmt(sp8FRow) + '\n');
+    if (!sp8FRow.noMajor) {
+        die('T-SP8: _monitorIdle() ' + sp8FRow.major + ' major GC / maxMs ' + sp8FRow.maxMs.toFixed(3) +
+            ' violates ' + JSON.stringify(RULES));
+    }
+    if (!(sp8FRow.bytesPerOp <= SP8_MAX_BYTES_PER_OP)) {
+        die('T-SP8: _monitorIdle() measured ' + sp8FRow.bytesPerOp.toFixed(4) + ' bytes/op, over the ' +
+            SP8_MAX_BYTES_PER_OP + ' ceiling -- the cold predicate is allocating.');
+    }
+    sp8F.audio.destroy();
+
     process.stderr.write(
         'result: boxed-double handle (bus>=1, gen>8388608) is below the gate resolution; ' +
         'plain-number handle keeps its zero-retain property (decisions/0001). The v1.2.0 ' +
@@ -1908,7 +2230,12 @@ async function main() {
         (SP3_LANE_CYCLES * 3) + ' build/teardown cycles (T-SP3-lane). PS1: destroyBus ' +
         'tombstones ONE dynamic bus in place -- pooled voices stopped (census delta 0), the ' +
         'husk pulled out of the lane flush, _busList length + every surviving index kept stable, ' +
-        'released clean across ' + SP7_CYCLES + ' create/destroyBus cycles under maxMajor:0/maxPauseMs<=4 (T-SP7).\n');
+        'released clean across ' + SP7_CYCLES + ' create/destroyBus cycles under maxMajor:0/maxPauseMs<=4 (T-SP7). ' +
+        'PS2: the shared monitor sleeps -- skips its own reschedule -- at zero live consumers and wakes on the ' +
+        'next registration (metered/discrete/duck/auto-suspend/positional/width/HRIR-prewarm), never double-arms, ' +
+        'a live auto-suspend countdown is never slept out from under itself and play() (T4) wakes a self-suspended ' +
+        'monitor, released clean across ' + SP8_CYCLES + ' create/tick/destroy/tick-to-sleep/wake cycles, and the ' +
+        'cold predicate itself holds zero retained allocation over ' + SP8_OPS + ' calls (T-SP8).\n');
     process.stdout.write('ok\n');
     process.exit(0);
 }

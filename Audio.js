@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.6.0';
+export const VERSION = '2.7.0';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -1122,6 +1122,11 @@ export class LiteAudio {
                     busRec.posOwner.fill(0);
                     busRec.posDirty.fill(0);
                 }
+                // The createBus-time arm (:908/:916) fires BEFORE this scratch
+                // exists (pool=null, posDirty=null), so a positional/discrete bus
+                // created before defineSounds would see no consumer, sleep, and
+                // never flush its positions. Re-arm now that the scratch is live.
+                this._startMonitor();
             }
             // Prewarm the HRIR set if the context is ALREADY unlocked at pool build
             // (a defineSounds/createBus that arrives after the user gesture). The
@@ -2348,6 +2353,14 @@ export class LiteAudio {
      * consumer (a duckOn rule, a metered bus, enableAutoSuspend) calls it, and
      * only the first one arms the timer. The tick closure is built once and
      * reschedules itself by reference so no closure is allocated per tick.
+     *
+     * Sleep-wake: the tick evaluates _monitorIdle() at its tail and SLEEPS -- by
+     * not rescheduling -- when no consumer is live. The sleep needs no unwind: the
+     * tick already nulled _monitorTimer at its head, so a slept monitor simply has
+     * _monitorTimer === null with no pending id. Every registration site
+     * (createBus meter/discrete/positional/hrtf, duckOn, enableAutoSuspend, the
+     * pool-build wake, _wakeFromAutoSuspend) calls back into _startMonitor, whose
+     * `if (this._monitorTimer != null) return;` guard re-arms exactly one timer.
      */
     _startMonitor() {
         if (this._monitorTimer != null) return;
@@ -2370,10 +2383,51 @@ export class LiteAudio {
                 this._flushLanes();
                 this._flushWidth();
                 this._evalAutoSuspend();
+                if (this._monitorIdle()) return;   // sleep: _monitorTimer already null
                 this._monitorTimer = this._setTimeout(this._monitorTick, MONITOR_INTERVAL_MS);
             };
         }
         this._monitorTimer = this._setTimeout(this._monitorTick, MONITOR_INTERVAL_MS);
+    }
+
+    /**
+     * Idle predicate: true when NO monitor consumer is live, read ONCE at the
+     * tick tail to guard the reschedule. Cold-tick only -- never a hot-path
+     * branch; play()/stop()/setPosition() are byte-unchanged. Allocation-free:
+     * scalar/.length reads plus one indexed for over _busList (the same array the
+     * tick already walks 3x/tick), locals only. No iterator, no Array method, no
+     * closure, no temp object, no ?.-chain.
+     *
+     * FAIL CLOSED TOWARD AWAKE. Any ambiguity or unverified state returns false
+     * (not idle) and keeps ticking: sleeping wrongly is silent breakage (frozen
+     * positions, a duck that never fires, silence never detected); staying awake
+     * wrongly costs one timer. null is not zero.
+     *
+     * Each _busList clause is the literal negation of its walker's OWN outer skip,
+     * so predicate and walker can never disagree: hrtfWarmHandle mirrors
+     * _retireHrtfWarm's skip (:2733), wideIn mirrors _flushWidth's (:2592),
+     * pool !== null && posDirty !== null mirrors _flushPositions' (:2449/:2451).
+     * busRec.positional / .spatial are deliberately NOT read -- destroyBus never
+     * clears them, so a tombstone husk would pin the monitor awake forever.
+     *
+     * R5 contract: every new monitor consumer MUST add a clause here, mirroring
+     * its walker's skip condition.
+     */
+    _monitorIdle() {
+        if (this._meteredBuses.length !== 0)  return false;   // C1
+        if (this._discreteBuses.length !== 0) return false;   // C2
+        if (this._duckRules.length !== 0)     return false;   // C3 (R1: permanent)
+        if (this._autoSuspend && !this._selfSuspended) return false; // C4
+
+        const list = this._busList;
+        for (let b = 0; b < list.length; b++) {
+            const busRec = list[b];
+            if (busRec.dead) continue;                        // tombstone husk
+            if (busRec.hrtfWarmHandle !== null) return false; // C7 == _retireHrtfWarm
+            if (busRec.wideIn !== null) return false;         // C6 == _flushWidth
+            if (busRec.pool !== null && busRec.posDirty !== null) return false; // C5
+        }
+        return true;                                          // no consumer: may sleep
     }
 
     /**
@@ -2670,6 +2724,11 @@ export class LiteAudio {
      */
     _wakeFromAutoSuspend() {
         this._selfSuspended = false;
+        // Re-arm the monitor BEFORE the ctx/resume guard below: _selfSuspended is
+        // now false, so auto-suspend is a live consumer again, but a context that
+        // lacks resume must still restart the monitor -- returning first would
+        // leave silence-tracking permanently dead (fail-closed ordering).
+        this._startMonitor();
         const ctx = this._ctx;
         if (!ctx || typeof ctx.resume !== 'function') return;
         const p = ctx.resume();

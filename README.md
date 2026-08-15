@@ -822,6 +822,7 @@ guards.
 | `setWidth(bus, w)` | 0 B (`<= 4 B/op` gate) | clamps to `[0, 1]`, stamps a target + dirty bit; `wet`/`makeup` writes ride the monitor |
 | lane solve (`_flushLanes`) | 0 B | data-driven VBAP walk into one reused `Float32Array(8)`, exactly `lanes` writes, no per-tick preset branch |
 | monitor tick | 0 B retained | RMS reads into one pre-allocated `Float32Array` per bus; every param write is `setTargetAtTime` |
+| monitor idle | 0 B, 0 timers when idle | the tick reads an allocation-free `_monitorIdle()` (scalar/`.length` reads + one indexed `_busList` scan) at its tail and stops rescheduling when no consumer is live; wakes on the next registration |
 
 The handle stays a plain `number` so `play()` never boxes -- it leaves V8's
 small-integer range on any bus `>= 1`, but the boxed-double cost is below the

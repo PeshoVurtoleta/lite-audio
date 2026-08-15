@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.8.0';
+export const VERSION = '2.9.0';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -2018,6 +2018,71 @@ export class LiteAudio {
         const release = opts.release ?? busRec.duckRelease ?? DUCK_RELEASE_TC;
         busRec.duckManual = false;
         busRec.duckGain.gain.setTargetAtTime(DUCK_REST, this._ctx.currentTime, release);
+    }
+
+    /**
+     * Remove the automatic duck follower from `triggerBus` to `targetBus`.
+     * Removes ALL rules matching the (trigger, target) pair - `opts`
+     * (threshold/level/attack/release) is NOT part of the key, so a caller
+     * removes "the follower", not one tuning of it. Returns `true` iff at least
+     * one rule was removed, else `false` (idempotent; unknown pair / non-string
+     * / null / undefined args never `===`-match a stored string pair, so they
+     * return `false` without throwing).
+     *
+     * Stranded-target recovery (fail-CLOSED): if a removed rule was actively
+     * dipping its target, that target's `duckGain` is released back to
+     * `DUCK_REST` - but ONLY when it is safe: the bus still exists, is not under
+     * a manual duck (stopDuck owns that latch), and is not still held dipped by
+     * a SURVIVING active rule on the same target. Skipping any of those would
+     * strand the bus silent forever, the fail-OPEN outcome we refuse to ship.
+     * When duplicate rules with differing release TCs are removed together, the
+     * FIRST-removed rule's `.release` governs the single recovery ramp (D5).
+     *
+     * Cold path, zero-alloc: an order-preserving in-place write-index
+     * compaction (no splice/filter garbage) plus a small survivor scan only when
+     * a removed rule was active. It NEVER pokes `_monitorTimer` / `_startMonitor`
+     * - when this empties the last duck consumer, the shared monitor idle-sleeps
+     * on its next `_monitorIdle()` tick (the PS2 mechanism), completing the
+     * duckOn-only idle-sleep story. See decisions/0013.
+     * @param {string} triggerBus - bus whose voice count drove the duck
+     * @param {string} targetBus - bus that was being dipped
+     * @returns {boolean} true if >= 1 rule was removed
+     */
+    removeDuckRule(triggerBus, targetBus) {
+        if (this._destroyed) return false;
+        const rules = this._duckRules;
+        const len = rules.length;
+        let w = 0;
+        let hadActive = false;
+        let removedRelease = DUCK_RELEASE_TC;   // first-removed rule's release governs (D5)
+        let removedAny = false;
+        for (let i = 0; i < len; i++) {
+            const rule = rules[i];
+            if (rule.triggerBus === triggerBus && rule.targetBus === targetBus) {
+                if (!removedAny) removedRelease = rule.release;
+                removedAny = true;
+                if (rule.active) hadActive = true;
+                continue;                         // drop (do not copy down)
+            }
+            rules[w++] = rule;                    // keep survivor, compact in place
+        }
+        if (!removedAny) return false;            // no match, idempotent
+        for (let i = w; i < len; i++) rules[i] = null;   // release dropped refs (retention)
+        rules.length = w;
+        if (hadActive) {
+            let heldBySurvivor = false;
+            for (let i = 0; i < w; i++) {
+                const r = rules[i];
+                if (r.active && r.targetBus === targetBus) { heldBySurvivor = true; break; }
+            }
+            if (!heldBySurvivor) {
+                const t = this._buses.get(targetBus);
+                if (t && !t.duckManual) {
+                    t.duckGain.gain.setTargetAtTime(DUCK_REST, this._ctx.currentTime, removedRelease);
+                }
+            }
+        }
+        return true;
     }
 
     /**

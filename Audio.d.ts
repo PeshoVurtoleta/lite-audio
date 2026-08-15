@@ -400,6 +400,17 @@ export class LiteAudio {
      */
     duckOn(triggerBus: string, targetBus: string, opts?: DuckOnOptions): void;
 
+    /**
+     * Remove ALL automatic duck followers from `triggerBus` to `targetBus` (opts
+     * are not part of the key). Returns true iff >= 1 rule was removed. If a
+     * removed rule was actively dipping its target, the target is released to
+     * rest - but only when the bus exists, is not under a manual duck, and is not
+     * still held by a surviving active rule (fail-closed). Cold, zero-alloc; never
+     * pokes the monitor - emptying the last duck consumer lets it idle-sleep on
+     * the next tick. See decisions/0013.
+     */
+    removeDuckRule(triggerBus: string, targetBus: string): boolean;
+
     /** Capture the current mix (every bus's volume + mute) under `name`. Track
      *  volumes are not captured. See decisions/0004. */
     captureSnapshot(name: string): void;

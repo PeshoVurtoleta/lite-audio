@@ -113,6 +113,19 @@
  *                                     clause, so the monitor sleeps mid-countdown
  *                                     and the context is never suspended
  *
+ * PS4 EXTENSION -- removeDuckRule lets a duckOn-only engine idle-sleep
+ *
+ * v2.9.0 adds removeDuckRule(triggerBus, targetBus), the missing removal
+ * counterpart to duckOn (decisions/0013). Until PS4, _duckRules was the ONE
+ * permanent monitor consumer -- C3 of _monitorIdle() -- so a duckOn-only engine
+ * could never sleep. T-SP8 phase (g) extends the same PS2 mock-scheduler rig
+ * with: duckOn as the sole consumer arms the monitor; removeDuckRule empties
+ * _duckRules and the very next flush sleeps it (monitorTimer===null, pending
+ * 0), frozen across further flushes -- the PS4 win. A retention loop of
+ * duckOn/removeDuckRule cycles, each with an active dip (so the stranded-target
+ * recovery write runs every cycle too), ends with _duckRules empty, a
+ * lite-leak witness of 0, and a flat live-node census delta.
+ *
  * Peers are devDependencies, never runtime deps: Audio.js has zero deps.
  *
  * @license MIT
@@ -2208,6 +2221,77 @@ async function main() {
     }
     sp8F.audio.destroy();
 
+    //     (g) PS4 duck-sleep (decisions/0013): duckOn as the SOLE consumer arms
+    //         the monitor; removeDuckRule empties _duckRules and the NEXT flush
+    //         sleeps it -- monitorTimer===null, pending 0, tick counter frozen
+    //         across >=10 further flushes (A1, the PS4 win: a duckOn-only engine
+    //         can finally idle-sleep). Then a retention loop of duckOn/
+    //         removeDuckRule cycles, each with an ACTIVE dip so the
+    //         stranded-target recovery write fires every cycle too, ends with
+    //         _duckRules empty, a lite-leak witness of 0, and a flat live-node
+    //         census delta (A2/A3).
+    const sp8G = await buildIdleEngine({ buses: ['gTrig', 'gTarg'] });
+    if (sp8G.audio._monitorTimer !== null) die('T-SP8 (g): setup -- a fresh engine must never be armed.');
+
+    sp8G.audio.duckOn('gTrig', 'gTarg');
+    if (sp8G.audio._monitorTimer === null) die('T-SP8 (g): duckOn as the sole consumer did not arm the monitor.');
+    if (sp8G.audio._duckRules.length !== 1) die('T-SP8 (g): setup -- expected exactly one duck rule.');
+
+    const sp8GOrigRetire = sp8G.audio._retireHrtfWarm.bind(sp8G.audio);
+    let sp8GTickCount = 0;
+    sp8G.audio._retireHrtfWarm = () => { sp8GTickCount++; sp8GOrigRetire(); };
+
+    if (sp8G.audio.removeDuckRule('gTrig', 'gTarg') !== true) die('T-SP8 (g): removeDuckRule did not report success.');
+    if (sp8G.audio._duckRules.length !== 0) die('T-SP8 (g): removeDuckRule did not empty _duckRules.');
+
+    sp8G.clock.flush();
+    if (sp8G.audio._monitorTimer !== null) die('T-SP8 (g): the next flush after removeDuckRule did not sleep the monitor.');
+    if (sp8G.clock.pending() !== 0) die('T-SP8 (g): pending()=' + sp8G.clock.pending() + ' after the sleep flush (expected 0).');
+    const sp8GTickAtSleep = sp8GTickCount;
+    for (let i = 0; i < 10; i++) sp8G.clock.flush();
+    if (sp8GTickCount !== sp8GTickAtSleep) {
+        die('T-SP8 (g): tick counter moved (' + sp8GTickAtSleep + ' -> ' + sp8GTickCount + ') across 10 further ' +
+            'flushes on a slept monitor -- a slept monitor must not resurrect itself.');
+    }
+    if (sp8G.clock.pending() !== 0) {
+        die('T-SP8 (g): pending()=' + sp8G.clock.pending() + ' after 10 further flushes on a slept monitor (expected 0).');
+    }
+    process.stderr.write('T-SP8 (g) duck-sleep: duckOn as sole consumer armed the monitor; removeDuckRule emptied ' +
+        '_duckRules and the next flush slept it -- monitorTimer=null, pending=0, tick counter frozen at ' +
+        sp8GTickCount + ' across 10 further flushes\n');
+    sp8G.audio.destroy();
+
+    const SP8G_CYCLES = 100_000;
+    const sp8GD = await buildIdleEngine({ buses: ['rTrig', 'rTarg'] });
+    const sp8GTracker = createLeakTracker({ name: 'lite-audio-duck-sleep-retention' });
+    const SP8G_NOOP = () => {};
+    let sp8GUndead = 0;
+    const sp8GBaseline = sp8GD.ctx._liveNodes();
+
+    for (let c = 0; c < SP8G_CYCLES; c++) {
+        sp8GD.audio.duckOn('rTrig', 'rTarg');
+        const rule = sp8GD.audio._duckRules[sp8GD.audio._duckRules.length - 1];
+        rule.active = true;   // simulate an active dip every cycle -- exercises the recovery write path too
+        const sentinel = { cycle: c };
+        const witness = sp8GTracker.track(sentinel, SP8G_NOOP, c);
+        const ok = sp8GD.audio.removeDuckRule('rTrig', 'rTarg');
+        if (ok && sp8GD.audio._duckRules.length === 0) { sp8GTracker.untrack(witness); } else { sp8GUndead++; }
+    }
+    if (sp8GD.audio._duckRules.length !== 0) {
+        die('T-SP8 (g): retention -- _duckRules not empty after ' + SP8G_CYCLES + ' cycles.');
+    }
+    const sp8GLeaked = sp8GTracker.size();
+    const sp8GAfterLive = sp8GD.ctx._liveNodes();
+    const sp8GLiveDelta = sp8GAfterLive - sp8GBaseline;
+    process.stderr.write('T-SP8 (g) retention: ' + SP8G_CYCLES + ' duckOn/removeDuckRule cycles (active dip each ' +
+        'cycle) -- lite-leak witnessed ' + sp8GLeaked + ' un-released record(s), ' + sp8GUndead + ' incomplete ' +
+        'removal(s), live-node delta ' + sp8GLiveDelta + ', _duckRules.length=' + sp8GD.audio._duckRules.length +
+        ' (all expected 0)\n');
+    if (sp8GUndead !== 0) die('T-SP8 (g): ' + sp8GUndead + ' cycle(s) did not fully remove their rule.');
+    if (sp8GLeaked !== 0) die('T-SP8 (g): lite-leak witnessed ' + sp8GLeaked + ' un-released record(s) after ' + SP8G_CYCLES + ' cycles.');
+    if (sp8GLiveDelta !== 0) die('T-SP8 (g): live-node census delta ' + sp8GLiveDelta + ' after ' + SP8G_CYCLES + ' cycles (expected 0).');
+    sp8GD.audio.destroy();
+
     process.stderr.write(
         'result: boxed-double handle (bus>=1, gen>8388608) is below the gate resolution; ' +
         'plain-number handle keeps its zero-retain property (decisions/0001). The v1.2.0 ' +
@@ -2235,7 +2319,10 @@ async function main() {
         'next registration (metered/discrete/duck/auto-suspend/positional/width/HRIR-prewarm), never double-arms, ' +
         'a live auto-suspend countdown is never slept out from under itself and play() (T4) wakes a self-suspended ' +
         'monitor, released clean across ' + SP8_CYCLES + ' create/tick/destroy/tick-to-sleep/wake cycles, and the ' +
-        'cold predicate itself holds zero retained allocation over ' + SP8_OPS + ' calls (T-SP8).\n');
+        'cold predicate itself holds zero retained allocation over ' + SP8_OPS + ' calls (T-SP8). ' +
+        'PS4: removeDuckRule empties the last duck consumer and the very next tick sleeps the monitor ' +
+        '(monitorTimer=null, pending=0, tick counter frozen), released clean with a flat live-node delta across ' +
+        SP8G_CYCLES + ' duckOn/removeDuckRule cycles, each exercising the stranded-target recovery write (T-SP8g).\n');
     process.stdout.write('ok\n');
     process.exit(0);
 }

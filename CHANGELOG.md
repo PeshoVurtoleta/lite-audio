@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.9.0
+
+Added `removeDuckRule(triggerBus, targetBus)` (post-suite backlog PS4): the
+duck-rule removal API the v2.7.0/PS2 note flagged as separate backlog. It removes
+ALL `_duckRules` entries matching the `(trigger, target)` pair (opts are not part
+of the key) and returns `true` iff at least one rule was removed, else `false`
+(idempotent, fail-closed on a destroyed engine / unknown pair / null / undefined
+/ non-string args -- never throws). This COMPLETES the PS2 idle-sleep story: duck
+rules were the one permanent monitor consumer, so a `duckOn`-only engine could
+never sleep; removing the last rule now lets the shared monitor idle-sleep on its
+next `_monitorIdle()` tick (removeDuckRule never pokes `_monitorTimer` /
+`_startMonitor` itself). Stranded-target recovery is fail-closed: a removed active
+rule's target is released back to rest only when the bus exists, is not under a
+manual duck, and is not still held by a surviving active rule -- else it would
+strand the bus silent. Zero-alloc, order-preserving in-place compaction (no
+splice/filter). NO hot-path or behavior change to `play()`, `stop()`,
+`setPosition()`, `_evalDuckRules()`, or `_monitorIdle()`; both `HashParity`
+goldens frozen. See `decisions/0013-remove-duck-rule.md`.
+
+### Added
+
+- `removeDuckRule(triggerBus, targetBus) -> boolean` -- remove every automatic
+  duck follower for the `(trigger, target)` pair, with fail-closed
+  stranded-target recovery to rest and PS2 idle-sleep for `duckOn`-only engines.
+  Cold, zero-alloc; off every hot path.
+
 ## 2.8.0
 
 Added `getHandleInfo(handle)` debug decoder (post-suite backlog PS3). A pure

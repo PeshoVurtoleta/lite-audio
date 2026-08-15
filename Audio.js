@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.10.0';
+export const VERSION = '2.11.0';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -2257,12 +2257,14 @@ export class LiteAudio {
      * (busGain x duckGain) read before anything changes, so a snapshot applied
      * mid-ramp - or mid-duck - picks up from where the sound actually is, with
      * no click. Applying a snapshot restates the mix, so it clears any manual
-     * duck latch on the buses it touches and resets their sidechain to rest.
-     * An active duckOn rule re-asserts only on the next trigger EDGE, not the
-     * next tick: _evalDuckRules is edge-gated (it writes only when shouldDuck
-     * crosses rule.active), so a trigger STILL above its threshold does NOT
-     * immediately re-duck a bus the snapshot just un-ducked -- it re-ducks only
-     * when the trigger next crosses the threshold.
+     * duck latch on the buses it touches and rests their sidechain -- but it
+     * NEVER un-ducks a bus whose duckOn trigger is STILL hot: that active duck
+     * RIDES THROUGH the snapshot (the sidechain is left dipped and rule.active
+     * stays true, so no write is added to the hot loop and the bus is never
+     * stranded un-ducked), and the existing _evalDuckRules edge rests it when
+     * the trigger later drops. Only a STALE active rule (its trigger already
+     * cold) is reset to inactive and rested to DUCK_REST here; a not-yet-active
+     * rule re-ducks on its next edge from that safe rest value.
      *
      * A bus whose target is silence (muted or zero) is left to the volume/mute
      * signals' own click-free settle rather than a sidechain fade, so duckGain
@@ -2289,12 +2291,42 @@ export class LiteAudio {
             busRec.volume.set(tgtVol);
             busRec.muted.set(tgtMuted);
 
-            // A snapshot restates the mix: drop any manual duck latch and clear
-            // the sidechain's pending schedule before we (maybe) morph it.
+            // A snapshot restates the mix: drop any manual duck latch.
             busRec.duckManual = false;
             const dg = busRec.duckGain.gain;
-            dg.cancelScheduledValues(now);
 
+            // PS6 reconcile (zero-alloc indexed scan, mirrors removeDuckRule):
+            // an ACTIVE duckOn rule whose trigger is STILL hot must keep this
+            // bus ducked across the snapshot -- resting it would strand it
+            // un-ducked until a fresh trigger edge. So:
+            //  - active + trigger hot  -> the duck RIDES THROUGH: leave the
+            //    sidechain dipped and rule.active TRUE; _evalDuckRules rests it
+            //    when the trigger later drops (edge active:true -> shouldDuck:false).
+            //  - active + trigger cold -> a STALE duck: reset rule.active=false
+            //    and let the rest below settle the sidechain to DUCK_REST.
+            let heldHot = false;
+            const rules = this._duckRules;
+            for (let r = 0; r < rules.length; r++) {
+                const rule = rules[r];
+                if (rule.targetBus !== snap.names[i]) continue;
+                if (!rule.active) continue;
+                const trig = this._buses.get(rule.triggerBus);
+                const voices = trig && trig.pool ? trig.pool.activeCount() : 0;
+                if (voices >= rule.threshold) heldHot = true;
+                else rule.active = false;
+            }
+
+            if (heldHot) {
+                // Duck rides through: bus volume is restated by the signals
+                // above (click-free at RAMP_TC); the sidechain stays where the
+                // live duck holds it (do NOT cancel/rest it, do NOT pin the gain
+                // morph -- there is nothing to morph toward while the trigger is
+                // hot). No strand, no pump, no ramp-vs-tick fight. The existing
+                // _evalDuckRules edge rests it when the trigger later drops.
+                continue;
+            }
+
+            dg.cancelScheduledValues(now);
             if (ms > 0 && tgtEff > 0) {
                 // Pin the bus gain to target and carry the ms morph on the
                 // sidechain, starting from whatever keeps the product continuous.

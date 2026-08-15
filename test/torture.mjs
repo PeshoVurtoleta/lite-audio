@@ -426,6 +426,14 @@ const TRK1_GC_CYCLES = 2_000;    // GC-budget window (a fresh, heavier per-op co
                                   // than the handle/scratch tiers -- real element +
                                   // gain-node construction -- so a smaller window)
 const TRK1_RED = process.env.LITEAUDIO_TORTURE_TRK1_RED === '1';
+// PS6 red control. DCK1_RED swaps in the SUPERSEDED first-draft applySnapshot
+// (reset every active rule + skip the DUCK_REST rest-ramp while the bus is hot),
+// which strands a still-hot bus dipped after a hot->cold race -- the fail-open
+// the reviewer caught. The shipped ride-through (decisions/0015) never un-ducks a
+// still-hot rule, so it never strands.
+const DCK1_RED = process.env.LITEAUDIO_TORTURE_DCK1_RED === '1';
+// Mirror of the private Audio.js sidechain rest multiplier (not exported).
+const DUCK_REST = 1;
 
 const LEAK = process.env.LITEAUDIO_TORTURE_LEAK === '1';
 const SP1_RED = process.env.LITEAUDIO_TORTURE_SP1_RED === '1';
@@ -944,6 +952,36 @@ async function buildIdleEngine({ buses = [], maxChannelCount = 8, capacity = 4 }
 }
 
 /**
+ * A running engine with an 'sfx' trigger bus (one decoded sound 'laser') and a
+ * 'music' target bus, unlocked so play('laser') makes sfx genuinely hot
+ * (pool.activeCount() >= 1) and stopAll() drops it cold -- the exact hot/cold
+ * mechanism test/MixIntelligence.test.js's boot() uses, so applySnapshot and
+ * _evalDuckRules both read a real activeCount(). One clock.flush() == one monitor
+ * tick (_evalDuckRules). Used by T-DCK1 (PS6).
+ */
+async function buildDuckSnapshotEngine() {
+    const ctx = createMockContext({ state: 'suspended' });
+    const clock = mockScheduler();
+    const fired = [];
+    const win = {
+        navigator: { userAgent: 'node-torture-gate', maxTouchPoints: 0 },
+        addEventListener: (evt, cb) => { fired.push(cb); },
+        removeEventListener: () => {},
+        fire: () => { for (const cb of [...fired]) cb({}); },
+    };
+    const audio = new LiteAudio({
+        buses: ['sfx', 'music'], poolCapacity: 8, window: win,
+        document: mockDocument(), fetch: mockFetch({ '/laser.wav': 500 }),
+        setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+    });
+    await audio.init(ctx);
+    await audio.defineSounds({ laser: { src: ['/laser.wav'], bus: 'sfx' } });
+    win.fire();
+    await flushMicrotasks(8);
+    return { audio, ctx, clock };
+}
+
+/**
  * The fail-open predicate the SP8_RED control swaps in for _monitorIdle: every
  * clause of the shipped predicate EXCEPT the C4 auto-suspend line
  * (`if (this._autoSuspend && !this._selfSuspended) return false;`). Modelling the
@@ -1056,6 +1094,56 @@ function redReloadTrack(name) {
     rec.duration.set(0);
     this._loadTrack(rec);
     return true;
+}
+
+/**
+ * The superseded first-draft applySnapshot the DCK1_RED control swaps in: it
+ * resets rule.active=false for EVERY active rule targeting a rested bus AND skips
+ * the DUCK_REST rest-ramp when the bus is still hot (busHot). That leaves a
+ * still-hot bus's duckGain sitting at the dipped curProduct/tgtEff with no
+ * scheduled move; when the trigger then goes cold before the next tick,
+ * _evalDuckRules sees shouldDuck:false === rule.active:false -> no edge -> the bus
+ * is STRANDED dipped (the fail-open the reviewer caught). The shipped ride-through
+ * (decisions/0015) leaves a still-hot rule engaged instead, so it never strands.
+ * Bound to the engine; structurally identical to the shipped method minus the
+ * ride-through.
+ */
+function redApplySnapshotStrand(name, ms = 0) {
+    if (this._destroyed) return;
+    const snap = this._snapshots.get(name);
+    if (!snap) return;
+    const now = this._ctx.currentTime;
+    for (let i = 0; i < snap.names.length; i++) {
+        const busRec = this._buses.get(snap.names[i]);
+        if (!busRec) continue;
+        const tgtVol = snap.vols[i];
+        const tgtMuted = snap.mutes[i];
+        const tgtEff = tgtMuted ? 0 : tgtVol;
+        const curProduct = busRec.gain.gain.value * busRec.duckGain.gain.value;
+        busRec.volume.set(tgtVol);
+        busRec.muted.set(tgtMuted);
+        busRec.duckManual = false;
+        const dg = busRec.duckGain.gain;
+        dg.cancelScheduledValues(now);
+        let busHot = false;
+        const rules = this._duckRules;
+        for (let r = 0; r < rules.length; r++) {
+            const rule = rules[r];
+            if (rule.targetBus !== snap.names[i]) continue;
+            if (rule.active) rule.active = false;
+            const trig = this._buses.get(rule.triggerBus);
+            const voices = trig && trig.pool ? trig.pool.activeCount() : 0;
+            if (voices >= rule.threshold) busHot = true;
+        }
+        if (ms > 0 && tgtEff > 0) {
+            busRec.gain.gain.cancelScheduledValues(now);
+            busRec.gain.gain.setValueAtTime(tgtEff, now);
+            dg.setValueAtTime(curProduct / tgtEff, now);
+            if (!busHot) dg.linearRampToValueAtTime(DUCK_REST, now + ms / 1000);
+        } else {
+            dg.setValueAtTime(DUCK_REST, now);
+        }
+    }
 }
 
 // --- gate --------------------------------------------------------------------
@@ -2604,6 +2692,99 @@ async function main() {
     }
     trkGcAudio.destroy();
 
+    // 16) T-DCK1 (PS6): applySnapshot reconciles a live duck rule via RIDE-THROUGH
+    //     (decisions/0015). A duckOn rule dips 'music' while 'sfx' is hot;
+    //     applySnapshot must NOT un-duck a still-hot bus (that would strand it
+    //     dipped until a fresh trigger edge -- the fail-open the reviewer caught in
+    //     the first skip-ramp draft). (a) contract: hot -> ride-through (music held
+    //     dipped, rule.active stays true), then a hot->cold race + one tick rests
+    //     music to DUCK_REST via the existing edge -- never stranded. (b) a
+    //     DCK1_CYCLES play/tick/applySnapshot/stopAll/tick soak: music rests every
+    //     cycle, _duckRules.length constant, lite-leak sentinels released. (c) the
+    //     reconcile scan is zero-alloc over a measured window. The red control
+    //     (DCK1_RED) swaps in the superseded reset+skip-ramp draft, whose hot->cold
+    //     race leaves music STRANDED dipped -> die -> exit 1.
+    const dckA = await buildDuckSnapshotEngine();
+    if (DCK1_RED) dckA.audio.applySnapshot = redApplySnapshotStrand;
+    dckA.audio.duckOn('sfx', 'music', { threshold: 1, level: 0.3, attack: 0.02, release: 0.5 });
+    dckA.audio.captureSnapshot('base');
+    const dckMusicA = () => dckA.audio._buses.get('music').duckGain.gain.value;
+
+    dckA.audio.play('laser');            // sfx hot
+    dckA.clock.flush();                  // tick: duck engages, music dips to level
+    if (Math.abs(dckMusicA() - 0.3) > 1e-6) die('T-DCK1 (a): setup -- music did not dip to level (got ' + dckMusicA() + ').');
+    const dckRuleA = dckA.audio._duckRules[0];
+
+    dckA.audio.applySnapshot('base', 250);   // still hot: SHIPPED rides through; RED resets+skips
+    dckA.audio.stopAll();                // sfx cold (no tick yet)
+    dckA.clock.flush();                  // tick: SHIPPED edges music to rest; RED sees no edge
+    const dckRestedA = dckMusicA();
+    if (dckRestedA < DUCK_REST - 1e-6) {
+        die('T-DCK1 (a)' + (DCK1_RED ? ' LITEAUDIO_TORTURE_DCK1_RED' : '') + ': music bus STRANDED dipped at ' +
+            dckRestedA.toFixed(4) + ' after a hot->cold race across applySnapshot (expected DUCK_REST=' + DUCK_REST +
+            (DCK1_RED ? '; the reset+skip-ramp draft leaves it un-rested -- rejecting as designed).' : ').'));
+    }
+    process.stderr.write('T-DCK1 (a) ride-through: a hot duckOn rule survives applySnapshot with music held dipped ' +
+        'and rule.active=' + dckRuleA.active + '; after a hot->cold race one tick rests music to DUCK_REST=' +
+        dckRestedA + ' via the existing edge -- never stranded (A2/A3)\n');
+    dckA.audio.destroy();
+
+    // (b) retention + no-strand soak.
+    const DCK1_CYCLES = 20_000;
+    const dckB = await buildDuckSnapshotEngine();
+    if (DCK1_RED) dckB.audio.applySnapshot = redApplySnapshotStrand;
+    dckB.audio.duckOn('sfx', 'music', { threshold: 1, level: 0.3 });
+    dckB.audio.captureSnapshot('base');
+    const dckTracker = createLeakTracker({ name: 'lite-audio-snapshot-duck-reconcile' });
+    const DCK1_NOOP = () => {};
+    const dckMusicB = () => dckB.audio._buses.get('music').duckGain.gain.value;
+    let dckStranded = 0;
+    const dckBaseLive = dckB.ctx._liveNodes();
+    for (let c = 0; c < DCK1_CYCLES; c++) {
+        dckB.audio.play('laser'); dckB.clock.flush();     // hot: duck engaged
+        dckB.audio.applySnapshot('base', 250);            // ride-through (or RED strand)
+        dckB.audio.stopAll(); dckB.clock.flush();         // cold: rest edge
+        const sentinel = { cycle: c };
+        const witness = dckTracker.track(sentinel, DCK1_NOOP, c);
+        if (dckMusicB() >= DUCK_REST - 1e-6 && dckB.audio._duckRules.length === 1) dckTracker.untrack(witness);
+        else dckStranded++;
+    }
+    if (dckB.audio._duckRules.length !== 1) die('T-DCK1 (b): _duckRules.length=' + dckB.audio._duckRules.length + ' after ' + DCK1_CYCLES + ' cycles (expected 1).');
+    const dckLeaked = dckTracker.size();
+    const dckLiveDelta = dckB.ctx._liveNodes() - dckBaseLive;
+    process.stderr.write('T-DCK1 (b) retention: ' + DCK1_CYCLES + ' play/tick/applySnapshot/stopAll/tick cycles -- ' +
+        'lite-leak witnessed ' + dckLeaked + ' un-released record(s), ' + dckStranded + ' stranded cycle(s), ' +
+        '_duckRules.length=' + dckB.audio._duckRules.length + ', live-node delta ' + dckLiveDelta +
+        ' (leaked/stranded expected 0, length 1)\n');
+    if (dckStranded !== 0) die('T-DCK1 (b)' + (DCK1_RED ? ' LITEAUDIO_TORTURE_DCK1_RED' : '') + ': ' + dckStranded + ' cycle(s) left music stranded dipped after the cold edge.');
+    if (dckLeaked !== 0) die('T-DCK1 (b): lite-leak witnessed ' + dckLeaked + ' un-released record(s) after ' + DCK1_CYCLES + ' cycles.');
+    dckB.audio.destroy();
+
+    // (c) the applySnapshot reconcile scan is zero-alloc. Measure applySnapshot in
+    //     steady state on a music-ONLY snapshot with the rule hot: the ride-through
+    //     path runs the scan and `continue`s writing no param, so the window
+    //     measures the scan alone (no mock event-array growth from a rested bus).
+    const DCK1_GC_OPS = 200_000;
+    const DCK1_GC_WARMUP = 50_000;
+    const DCK1_MAX_BYTES_PER_OP = 1.0;
+    const dckC = await buildDuckSnapshotEngine();
+    dckC.audio.duckOn('sfx', 'music', { threshold: 1, level: 0.3 });
+    const dckMusVol = dckC.audio._buses.get('music').volume.peek();
+    dckC.audio._snapshots.set('musonly', { names: ['music'], vols: [dckMusVol], mutes: [false] });
+    dckC.audio.play('laser'); dckC.clock.flush();     // sfx hot, music dipped, rule active
+    const dckGc = measureOps(() => { dckC.audio.applySnapshot('musonly', 0); },
+        { ops: DCK1_GC_OPS, warmup: DCK1_GC_WARMUP, source: 'gc', stabilize: true });
+    const dckReport = checkNoGc(dckGc.summary, RULES);
+    process.stderr.write('T-DCK1 (c) reconcile-scan allocation (' + DCK1_GC_OPS + ' hot-rule ride-through calls): ' +
+        'gc major=' + dckGc.summary.gc.major + ' minor=' + dckGc.summary.gc.minor + ' maxMs=' +
+        dckGc.summary.gc.maxMs.toFixed(2) + ' (' + (dckGc.bytesPerOp == null ? 'null' : dckGc.bytesPerOp.toFixed(4)) + ' B/op)\n');
+    if (!dckReport.ok) die('T-DCK1 (c): applySnapshot scan violated ' + JSON.stringify(RULES) + ' (major=' + dckGc.summary.gc.major + ').');
+    if (!(dckGc.bytesPerOp != null && dckGc.bytesPerOp <= DCK1_MAX_BYTES_PER_OP)) {
+        die('T-DCK1 (c): applySnapshot reconcile measured ' + (dckGc.bytesPerOp == null ? 'null' : dckGc.bytesPerOp.toFixed(4)) +
+            ' B/op, over the ' + DCK1_MAX_BYTES_PER_OP + ' ceiling -- the scan is allocating.');
+    }
+    dckC.audio.destroy();
+
     process.stderr.write(
         'result: boxed-double handle (bus>=1, gen>8388608) is below the gate resolution; ' +
         'plain-number handle keeps its zero-retain property (decisions/0001). The v1.2.0 ' +
@@ -2639,7 +2820,13 @@ async function main() {
         'wire-failed spent element reaches \'ready\' behind a fresh element (A4), and a ' + TRK1_CYCLES +
         '-cycle force-error/reloadTrack soak releases every spent element/graph node (lite-leak witness 0, exactly ' +
         'one fresh element per cycle) while the four external signals hold object identity across every cycle, ' +
-        'not just a spot check (A1/A2), under maxMajor:0/maxPauseMs<=4 (T-TRK1).\n');
+        'not just a spot check (A1/A2), under maxMajor:0/maxPauseMs<=4 (T-TRK1). ' +
+        'PS6: applySnapshot reconciles a live duck rule by RIDE-THROUGH -- a still-hot duckOn rule survives ' +
+        'a snapshot with its target held dipped and rule.active true (never un-ducked/stranded), and the ' +
+        'existing edge rests it when the trigger drops; the reconcile scan is zero-alloc and a ' + DCK1_CYCLES +
+        '-cycle play/tick/applySnapshot/stopAll/tick soak leaves 0 stranded and 0 leaked, _duckRules.length ' +
+        'constant, released clean, while the red control (DCK1_RED) reproduces the superseded draft\'s ' +
+        'hot->cold strand and is rejected (T-DCK1).\n');
     process.stdout.write('ok\n');
     process.exit(0);
 }

@@ -433,7 +433,13 @@ export class LiteAudio {
      * Morph the mix to a captured snapshot over `ms`. Signals become truthful
      * immediately; the audible transition rides the sidechain and is continuous
      * from the actual current level, so a mid-morph apply is click-free. `ms` of 0
-     * snaps via the signals. Inert for an unknown name.
+     * snaps via the signals. Inert for an unknown name. Restating the mix clears
+     * any manual duck latch, but NEVER un-ducks a bus whose duckOn trigger is
+     * still hot: that active duck rides through the snapshot (sidechain left
+     * dipped, rule.active stays true, no write added to the hot loop, never
+     * stranded), and the existing _evalDuckRules edge rests it when the trigger
+     * drops. Only a stale active rule (trigger already cold) is reset and rested
+     * to DUCK_REST. See decisions/0015.
      */
     applySnapshot(name: string, ms?: number): void;
 

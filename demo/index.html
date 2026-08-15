@@ -735,6 +735,27 @@
                 grid-area: log;
             }
 
+            #deck-life {
+                grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                grid-template-areas: "track duck" "bus handle";
+            }
+
+            #p-life-track {
+                grid-area: track;
+            }
+
+            #p-life-duck {
+                grid-area: duck;
+            }
+
+            #p-life-bus {
+                grid-area: bus;
+            }
+
+            #p-life-handle {
+                grid-area: handle;
+            }
+
             .rack {
                 grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
             }
@@ -772,6 +793,7 @@
     <button data-scene="3" aria-pressed="false">4 / unlock theater</button>
     <button data-scene="4" aria-pressed="false">5 / spatial field</button>
     <button data-scene="5" aria-pressed="false">6 / stereo width</button>
+    <button data-scene="6" aria-pressed="false">7 / lifecycle</button>
 </nav>
 
 <!-- ============================ VOICE GRID ============================== -->
@@ -890,9 +912,20 @@
             <button id="b-snap-a">apply A (music up)</button>
             <button id="b-snap-b">apply B (sfx up)</button>
         </div>
+        <div class="row">
+            <span class="lbl">re-duck A/B (v2.11.0)</span>
+            <button id="b-snap-mode" aria-pressed="true">NEW next-tick</button>
+            <button id="b-snap-hot">apply while sfx is hot</button>
+        </div>
         <p class="note">The A/B snapshots capture every bus's volume and mute as data, then morph the whole desk between
             them over the fade time - riding the same sidechain node the duck uses, so a snapshot applied mid-fade picks
             up from where the sound actually is. Fire a crossfade and hit <b>A</b> halfway: no click.</p>
+        <p class="note"><b>Re-duck A/B (v2.11.0):</b> arm <em>duckOn(sfx -&gt; music)</em>, hold sfx voices ABOVE the
+            threshold, then apply a snapshot that would rest the music sidechain. Under <b>NEW</b>, the still-hot duck
+            RIDES THROUGH the snapshot - music stays ducked and the existing edge rests it only when sfx drops; under
+            <b>OLD</b> the edge-gated loop rested the sidechain while the rule stayed active, so music sat STRANDED
+            un-ducked until the trigger re-crossed. The button reports the measured <em>music</em> duckGain after a tick
+            in the event log.</p>
     </section>
 </main>
 
@@ -1082,6 +1115,82 @@
     </section>
 </main>
 
+<!-- ============================ LIFECYCLE ============================= -->
+<main id="deck-life" class="deck" hidden>
+    <section id="p-life-track" class="panel">
+        <div class="panel-title"><span>reloadTrack(name) / scoped error-state recovery</span><b id="lf-track">-</b></div>
+        <dl class="readout">
+            <dt>trackLoadState(theme)</dt>
+            <dd id="lf-track-state">-</dd>
+            <dt>reloadTrack(theme) returned</dt>
+            <dd id="lf-track-ret">-</dd>
+        </dl>
+        <div class="row">
+            <button id="b-lf-reload">reloadTrack(theme)</button>
+        </div>
+        <p class="note"><em>reloadTrack(name)</em> tears ONE track's graph + <em>&lt;audio&gt;</em> element down and
+            re-enters the loader with a FRESH element - the only escape from the one-<em>MediaElementSource</em>-per-element
+            constraint. It fires ONLY from <b>error</b>/<b>idle</b> and returns a boolean SYNC: a healthy <b>ready</b>
+            track returns <b>false</b> (reload recovers an errored track, it does not restart a healthy one). The four
+            signals are reused, never disposed, so a subscribed HUD keeps its bindings.</p>
+    </section>
+
+    <section id="p-life-duck" class="panel">
+        <div class="panel-title"><span>removeDuckRule(trigger, target) / teardown</span><b id="lf-duck">-</b></div>
+        <dl class="readout">
+            <dt>_duckRules.length</dt>
+            <dd id="lf-duck-len">-</dd>
+            <dt>removeDuckRule returned</dt>
+            <dd id="lf-duck-ret">-</dd>
+        </dl>
+        <div class="row">
+            <button id="b-lf-arm">duckOn(sfx -&gt; music)</button>
+            <button id="b-lf-rm">removeDuckRule(sfx, music)</button>
+        </div>
+        <p class="note"><em>removeDuckRule(triggerBus, targetBus)</em> drops ALL followers for that pair (opts are not
+            part of the key) and returns <b>true</b> iff &gt;= 1 rule was removed, else <b>false</b> (idempotent). An
+            active rule's target is released to rest fail-closed. Zero-alloc in-place compaction; emptying the last duck
+            consumer lets the shared monitor idle-sleep on its next tick.</p>
+    </section>
+
+    <section id="p-life-bus" class="panel">
+        <div class="panel-title"><span>destroyBus(name) / per-bus teardown</span><b id="lf-bus">-</b></div>
+        <dl class="readout">
+            <dt>live buses</dt>
+            <dd id="lf-bus-count">-</dd>
+            <dt>destroyBus returned</dt>
+            <dd id="lf-bus-ret">-</dd>
+        </dl>
+        <div class="row">
+            <button id="b-lf-mkbus">createBus(scratch)</button>
+            <button id="b-lf-killbus">destroyBus(scratch)</button>
+        </div>
+        <p class="note"><em>destroyBus(name)</em> tears down ONE dynamic (createBus) bus - stops its voices, destroys its
+            pool, disconnects its graph, disposes its signals - and TOMBSTONES its <em>_busList</em> slot in place
+            (never spliced, so no live voice handle is reindexed onto the wrong bus). Returns <b>true</b> for a live
+            dynamic bus, <b>false</b> for an unknown/dead bus; throws on <em>'master'</em> or a static bus.</p>
+    </section>
+
+    <section id="p-life-handle" class="panel">
+        <div class="panel-title"><span>getHandleInfo(handle) / structural decode</span><b id="lf-handle">-</b></div>
+        <dl class="readout">
+            <dt>handle</dt>
+            <dd id="lf-handle-raw">-</dd>
+            <dt>{ busName, generation, channel }</dt>
+            <dd id="lf-handle-info">-</dd>
+            <dt>getHandleInfo(-1) (sentinel)</dt>
+            <dd id="lf-handle-null">-</dd>
+        </dl>
+        <div class="row">
+            <button id="b-lf-decode">play sfx + decode handle</button>
+        </div>
+        <p class="note"><em>getHandleInfo(handle)</em> is a pure structural decoder -&gt; <em>{ busName, generation,
+            channel }</em> or <b>null</b>. It reads what the bits SAY (not whether the voice is still live - that is
+            <em>isPlaying</em>). Fail-closed <b>null</b> on any sentinel (<b>-1</b>/<b>-2</b>), non-integer, negative, or
+            a handle whose bus is unknown or <em>destroyBus</em>'d.</p>
+    </section>
+</main>
+
 <!-- ============================ SHARED RACK ============================ -->
 <div class="rack">
     <section class="panel">
@@ -1253,6 +1362,7 @@
         document.getElementById('deck-unlock'),
         document.getElementById('deck-spatial'),
         document.getElementById('deck-width'),
+        document.getElementById('deck-life'),
     ];
 
     const $bState = document.getElementById('b-state');
@@ -1282,6 +1392,25 @@
     const $bStopMusic = document.getElementById('b-stop-music');
     const $bSnapA = document.getElementById('b-snap-a');
     const $bSnapB = document.getElementById('b-snap-b');
+    const $bSnapMode = document.getElementById('b-snap-mode');
+    const $bSnapHot = document.getElementById('b-snap-hot');
+
+    // scene 7: lifecycle
+    const $bLfReload = document.getElementById('b-lf-reload');
+    const $lfTrackState = document.getElementById('lf-track-state');
+    const $lfTrackRet = document.getElementById('lf-track-ret');
+    const $bLfArm = document.getElementById('b-lf-arm');
+    const $bLfRm = document.getElementById('b-lf-rm');
+    const $lfDuckLen = document.getElementById('lf-duck-len');
+    const $lfDuckRet = document.getElementById('lf-duck-ret');
+    const $bLfMkbus = document.getElementById('b-lf-mkbus');
+    const $bLfKillbus = document.getElementById('b-lf-killbus');
+    const $lfBusCount = document.getElementById('lf-bus-count');
+    const $lfBusRet = document.getElementById('lf-bus-ret');
+    const $bLfDecode = document.getElementById('b-lf-decode');
+    const $lfHandleRaw = document.getElementById('lf-handle-raw');
+    const $lfHandleInfo = document.getElementById('lf-handle-info');
+    const $lfHandleNull = document.getElementById('lf-handle-null');
 
     const $fsmNow = document.getElementById('fsm-now');
     const $lockState = document.getElementById('lock-state');
@@ -3164,6 +3293,99 @@
         ensureSnapshots();
         engine.applySnapshot('B', xfadeMs);
         logPush('snap', 'applySnapshot(B) morph ' + xfadeMs + 'ms');
+    });
+
+    // Re-duck A/B (v2.11.0): a still-hot duck rides through applySnapshot (NEW,
+    // the shipped path -- music stays ducked). OLD reproduces the pre-2.11 stall
+    // by resting the sidechain while the rule stays active, so no edge re-ducks it.
+    let snapNewMode = true;
+    $bSnapMode.addEventListener('click', () => {
+        snapNewMode = !snapNewMode;
+        $bSnapMode.textContent = snapNewMode ? 'NEW next-tick' : 'OLD edge-gated';
+        $bSnapMode.setAttribute('aria-pressed', snapNewMode ? 'true' : 'false');
+    });
+
+    $bSnapHot.addEventListener('click', () => {
+        if (!engine || !engine.unlocked().peek()) {
+            logPush('drop', 'hot-apply ignored: unlock on scene 4 first');
+            return;
+        }
+        ensureSnapshots();
+        engine.duckOn('sfx', 'music', {threshold: 1, level: 0.25, attack: 0.05, release: 0.35});
+        // Sustain sfx above threshold across the whole apply + tick window.
+        let n = 0;
+        const hot = setInterval(() => {
+            fire('sting', 0.85, 0, 1);
+            if (++n > 12) clearInterval(hot);
+        }, 55);
+        setTimeout(() => {
+            engine.applySnapshot('A', 0);        // ride-through keeps music ducked
+            const music = engine._buses.get('music');
+            if (!snapNewMode) {
+                // Reproduce the pre-2.11 edge-gated stall: rest the sidechain while
+                // the rule stays active(true), so no edge re-ducks it -> stranded.
+                music.duckGain.gain.setValueAtTime(1, ctx.currentTime);
+            }
+            setTimeout(() => {
+                const g = music.duckGain.gain.value;
+                logPush('snap', (snapNewMode ? 'NEW' : 'OLD') + ' hot-apply: music duckGain=' +
+                    g.toFixed(2) + (g < 0.9 ? ' (ducked, rides through)' : ' (STRANDED un-ducked)'));
+            }, 220);
+        }, 180);
+    });
+
+    // ---- scene 7: lifecycle ----
+    $bLfReload.addEventListener('click', () => {
+        if (!engine) return;
+        const ret = engine.reloadTrack('theme');
+        const state = engine.trackLoadState('theme').peek();
+        $lfTrackRet.textContent = String(ret);
+        $lfTrackState.textContent = state;
+        logPush('track', 'reloadTrack(theme) -> ' + ret + ' (state ' + state + ')');
+    });
+
+    $bLfArm.addEventListener('click', () => {
+        if (!engine) return;
+        engine.duckOn('sfx', 'music', {threshold: 1, level: 0.25, attack: 0.05, release: 0.35});
+        $lfDuckLen.textContent = String(engine._duckRules.length);
+        logPush('duck', 'duckOn(sfx -> music) armed');
+    });
+    $bLfRm.addEventListener('click', () => {
+        if (!engine) return;
+        const ret = engine.removeDuckRule('sfx', 'music');
+        $lfDuckRet.textContent = String(ret);
+        $lfDuckLen.textContent = String(engine._duckRules.length);
+        logPush('duck', 'removeDuckRule(sfx, music) -> ' + ret);
+    });
+
+    $bLfMkbus.addEventListener('click', () => {
+        if (!engine) return;
+        engine.createBus('scratch', {meter: false});
+        $lfBusCount.textContent = String(engine._buses.size);
+        logPush('bus', 'createBus(scratch): ' + engine._buses.size + ' live buses');
+    });
+    $bLfKillbus.addEventListener('click', () => {
+        if (!engine) return;
+        const ret = engine.destroyBus('scratch');
+        $lfBusRet.textContent = String(ret);
+        $lfBusCount.textContent = String(engine._buses.size);
+        logPush('bus', 'destroyBus(scratch) -> ' + ret + ': ' + engine._buses.size + ' live buses');
+    });
+
+    $bLfDecode.addEventListener('click', () => {
+        if (!engine || !engine.unlocked().peek()) {
+            logPush('drop', 'decode ignored: unlock on scene 4 first');
+            return;
+        }
+        const h = engine.play('sting', 0.8, 0, 1);
+        const info = engine.getHandleInfo(h);
+        $lfHandleRaw.textContent = String(h);
+        $lfHandleInfo.textContent = info
+            ? '{ ' + info.busName + ', gen ' + info.generation + ', ch ' + info.channel + ' }'
+            : 'null';
+        $lfHandleNull.textContent = String(engine.getHandleInfo(-1));
+        logPush('play', 'getHandleInfo(' + h + ') -> ' +
+            (info ? info.busName + ' gen ' + info.generation + ' ch ' + info.channel : 'null'));
     });
 
     function musicGuard(id) {

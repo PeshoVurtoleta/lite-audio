@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.11.0
+
+Changed `applySnapshot(name, ms)` so a live duck rides through the snapshot instead
+of being stranded (post-suite backlog PS6). Applying a snapshot restates the mix --
+it rests each touched bus's sidechain and drops manual duck latches -- but until now
+an active `duckOn` rule was left un-reconciled: `_evalDuckRules` is edge-gated
+(`if (shouldDuck === rule.active) continue;`), so a trigger STILL above its threshold
+kept the bus un-ducked until it stopped and re-crossed. applySnapshot now reconciles
+each rested bus against its rules with a zero-alloc indexed scan: an ACTIVE rule
+whose trigger is STILL HOT RIDES THROUGH -- the sidechain is left dipped and
+`rule.active` stays `true`, so the bus is never stranded un-ducked and the existing
+`_evalDuckRules` edge rests it when the trigger later drops. Only a STALE active
+rule (its trigger already cold) is reset to inactive and rested to `DUCK_REST`; a
+not-yet-active rule re-ducks on its next edge from that safe rest value. This closes
+the strand a naive reset-and-rest would open (a bus dipped, snapshotted, and gone
+cold before the next tick would sit stranded quieter than the mix states) and adds
+NO byte to the hot duck loop -- the ride-through branch writes no AudioParam. Cold-
+path change only, in the `applySnapshot` bus loop, reusing `removeDuckRule`'s
+in-place scan idiom, scoped to the buses the snapshot actually RESTED. NO change to
+`play()`, `stop()`, `setPosition()`, `_evalDuckRules()`, or `_monitorIdle()`; both
+`HashParity` goldens frozen. See `decisions/0015-snapshot-duck-reconcile.md`.
+
+### Changed
+
+- `applySnapshot(name, ms)` -- a still-hot `duckOn` duck now rides through a
+  snapshot (bus stays ducked, never stranded un-ducked), and the existing edge
+  rests it when the trigger drops; only a stale active rule (trigger already cold)
+  is reset and rested. Cold-path reconcile only; the hot duck loop is byte-unchanged.
+
 ## 2.10.0
 
 Added `reloadTrack(name)` (post-suite backlog PS5): scoped error-state recovery

@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.7.0';
+export const VERSION = '2.8.0';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -1300,6 +1300,44 @@ export class LiteAudio {
             if (busRec.index === index) return name;
         }
         return null;
+    }
+
+    /**
+     * Decode a voice handle's opaque bit packing for debugging ("wrong voice
+     * stopped") into a plain { busName, generation, channel } object, or null.
+     *
+     * PURE STRUCTURAL DECODE: it reports what the bits SAY, not whether the
+     * voice is still live -- that is isPlaying(handle)'s job. The packing is
+     * handle = busIndex * BUS_STRIDE + poolHandle, poolHandle = ((gen << 8) |
+     * channel) >>> 0 (decisions/0001-handle-namespace.md): high half names the
+     * bus, low 24 bits the generation, low 8 the channel. The generation WRAPS
+     * at 2^24 (decisions/0002-generation-wrap.md), so it is the stored low bits,
+     * not a monotonic age.
+     *
+     * Fail-closed null on any sentinel (-1 Skipped, -2 TrackStarted), any
+     * non-integer (NaN/undefined/null/string/float), any negative, and any
+     * handle whose bus is unknown (busIndex past _busList) or destroyBus'd
+     * (tombstoned; its name binding is dropped). The Number.isInteger guard runs
+     * FIRST because busOf alone is fail-OPEN on NaN (would name bus 0), so this
+     * decoder guards the type itself rather than delegating it.
+     *
+     * Off the hot path (never called by play/stop/isPlaying/setPosition/the
+     * monitor), so it MAY allocate: it reuses the busOf decode for the bus-name
+     * half and returns one fresh result object per call.
+     * See decisions/0012-get-handle-info.md.
+     * @param {number} handle
+     * @returns {{ busName: string, generation: number, channel: number }|null}
+     */
+    getHandleInfo(handle) {
+        if (!Number.isInteger(handle) || handle < 0) return null;
+        const busName = this.busOf(handle);
+        if (busName === null) return null;
+        const poolHandle = handle >>> 0;
+        return {
+            busName,
+            generation: poolHandle >>> 8,
+            channel:    poolHandle & 0xFF,
+        };
     }
 
     /**

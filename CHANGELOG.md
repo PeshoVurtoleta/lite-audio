@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.8.0
+
+Added `getHandleInfo(handle)` debug decoder (post-suite backlog PS3). A pure
+structural decode of a voice handle's opaque `[bus:21][gen:24][ch:8]` packing to
+a plain `{ busName, generation, channel }` object, or `null` on any sentinel,
+non-integer, negative, or unknown/destroyed-bus handle. It reuses the existing
+`busOf` decode for the bus-name half and reports what the bits say, not whether
+the voice is still live (that is `isPlaying(handle)`). NO hot-path or behavior
+change to `play()`, `stop()`, `setPosition()`, or the monitor tick; both
+`HashParity` goldens (`play()`, `stop()`) are frozen. See
+`decisions/0012-get-handle-info.md`.
+
+### Added
+
+- `getHandleInfo(handle) -> { busName, generation, channel } | null` -- an
+  off-the-hot-path debug/query decoder for the "wrong voice stopped" case. Fails
+  closed to `null` and allocates one fresh result object per call (no hot body
+  gains any allocation, arg, or branch).
+
 ## 2.7.0
 
 Monitor idle refcount / sleep-wake (post-suite backlog PS2). The shared ~10 Hz

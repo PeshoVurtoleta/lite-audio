@@ -262,6 +262,17 @@ export class LiteAudio {
     busOf(handle: VoiceHandle | Skipped | TrackStarted): string | null;
 
     /**
+     * Decode a handle's opaque [bus:21][gen:24][ch:8] packing for debugging
+     * ("wrong voice stopped"). PURE structural decode -- reports what the bits
+     * say, not whether the voice is still live (ask isPlaying). Returns null for
+     * any sentinel, non-integer, negative, or a handle whose bus is unknown or
+     * has been destroyBus'd. Off the hot path; allocates one result object.
+     */
+    getHandleInfo(handle: VoiceHandle | Skipped | TrackStarted): {
+        busName: string; generation: number; channel: number;
+    } | null;
+
+    /**
      * SFX voices sounding on a bus, or across every bus with no argument.
      * Tracks are not voices and are not counted - ask trackPlaying(name).
      */

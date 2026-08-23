@@ -326,6 +326,13 @@ export class LiteAudio {
     resumeTrack(name: string): void;
 
     /**
+     * Set a track's baseline gain (the volumeGain level, independent of the
+     * crossfade knob). Fail closed: unknown track, an unwired graph, or a
+     * non-number / NaN `v` is a silent no-op; `v` is clamped to [0, 1].
+     */
+    setTrackVolume(name: string, v: number): void;
+
+    /**
      * Equal-power crossfade between two tracks. Either side may be null.
      * Case (c) interruption semantics: only tracks named in this call are
      * touched. A track fading out from a previous crossfade keeps its

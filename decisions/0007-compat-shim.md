@@ -84,6 +84,46 @@ branched on the `null` return breaks. See PARITY DIV-1.
   added (a shim-only extension) for tests and for callers that want to await
   load; a game that plays before ready simply queues (decision 3).
 
+## 2.12.0 amendment (session AU1 consumer brief)
+
+The AU1 Howler retirement (`BRIEF.md`) shipped over `./compat` and filed five
+findings. The fixes and their rationale:
+
+- **A-1 restart, not resume (the emulated surface).** `play()` on a track called
+  `playTrack(name, {})`, which is idempotent resume-from-position. But the manager
+  surface being emulated is Howler's `sound.play()`, which starts a new instance
+  at position 0 every time -- *restart* is the faithful behavior, and it matters
+  the moment a track is interrupted (a jackpot fanfare clicked mid-play must not
+  resume truncated). `play()` now defaults to `playTrack(name, { restart: true })`;
+  a new `PlayOptions.resume` opts back into resume. Restart is the default because
+  it is what the surface means, not because resume is wrong.
+- **A-2 per-play volume via engine `setTrackVolume` (faithful because a track is a
+  singleton).** `PlayOptions.volume` was dropped on the track path -- a track's
+  level was baked into `volumeGain` at wire time with no public setter. Added
+  `LiteAudio.setTrackVolume(name, v)` and forward it from `play()`, but ONLY when
+  volume was explicitly passed (a defaulted `volume: 1` must not clobber a
+  config-set level). Setting the singleton track's baseline for this and later
+  plays is the faithful mapping: a track *is* one addressed object, so "this
+  play's volume" and "the track's volume" are the same knob, unlike a pooled SFX
+  where each voice is distinct.
+- **A-5 realm capture.** `muteEvent()` read `globalThis.CustomEvent` at dispatch
+  while the class extends the `EventTarget` bound at module eval. In one realm
+  (a browser) identical; under jsdom-in-node they differ and node's brand-checking
+  `dispatchEvent` throws `ERR_INVALID_ARG_TYPE` on every `setMuted()`. Capturing
+  `CustomEvent` once at module load, beside the extended `EventTarget`, binds both
+  to the same realm. The Node < 19 plain-`Event` fallback is preserved.
+- **A-3 / DIV-1 (docs only).** Recorded that looping a short SFX costs it the pool
+  (config `loop` classifies it as a streamed track), and that the unlock queue
+  covers pooled SFX only -- `playTrack` returns early pre-unlock, so tracks are
+  not queued. No code change; the classifier and queue behavior were already
+  correct, only under-documented.
+- **A-4 (packaging).** `test/mock-ctx.js` is published behind a `"./testing"`
+  export so a consumer's adapter tests run against the same harness this package
+  uses, rather than a vendored copy that drifts.
+
+Version 2.12.0 is a minor bump: the engine method is additive and the shim
+changes are behavior corrections against the emulated surface, not a core break.
+
 ## For a future reviewer
 
 - The shim owns a `name -> Set<handle>` map because the manager's `stop()` is

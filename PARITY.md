@@ -49,6 +49,17 @@ Each is a documented, tested difference — parity by decision, not by accident.
 | DIV-3 | active ids auto-cleaned on Howl's `'end'` event | pruned by an `isPlaying()` sweep on each `play()` | the pool exposes no per-voice end callback; the sweep is bounded by pool capacity and needs no timer | DIV-3 |
 | DIV-4 | one `Howl` type for every sound | `loop`/`html5` sounds → streamed **tracks**; others → pooled **SFX** | lite-audio splits streamed music from one-shot SFX; a migrant's music becomes a real stream | P-CLASS, P-P3 |
 
+Two clauses on the rows above:
+
+- **DIV-1 covers pooled SFX only.** The unlock queue holds *pooled SFX* plays;
+  `playTrack` returns early while the context is locked, so a track fired
+  pre-unlock is **not** queued and does not survive to first gesture. A caller
+  should start a track after unlock (watch `unlocked()`), not before.
+- **DIV-4 costs the pool to loop.** Declaring a sound `loop` classifies it as a
+  streamed track, so looping a short interaction SFX moves it from a decoded
+  buffer in the pool to an `<audio>` stream. The pool has no `loop`; a looping
+  one-shot has no pooled option (A-3).
+
 ## Semantic maps (no behavior change, different mechanism)
 
 - **`category` → bus.** The manager stops by category by scanning its config;

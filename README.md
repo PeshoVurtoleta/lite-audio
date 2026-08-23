@@ -727,6 +727,29 @@ plays are kept and queued rather than dropped) are documented and tested, with
 the reasoning in [`decisions/0007-compat-shim.md`](decisions/0007-compat-shim.md).
 Full migration guide: [`MIGRATION.md`](MIGRATION.md).
 
+Classification trade-off: declaring a sound `loop` classifies it as a streamed
+track, so looping a short *interaction* SFX costs it the pool -- it goes from a
+decoded buffer to an `<audio>` stream. The pool has no `loop`, so a looping
+one-shot has no pooled option. `PlayOptions.volume` is honored on both paths
+(for a track it sets the baseline for this and later plays); `PlayOptions.resume`
+(track only, default `false`) restarts the track like the manager, or resumes
+from the paused position when `true`.
+
+### Testing your adapter
+
+An adapter written over `./compat` can be tested against the real engine in node
+via the published Web Audio mock, exported at `@zakkster/lite-audio/testing`:
+
+```js
+import { createMockContext, mockFetch } from '@zakkster/lite-audio/testing';
+import { audioManager } from '@zakkster/lite-audio/compat';
+```
+
+It hands out mock contexts, `<audio>` elements, a manual timer scheduler, and a
+`fetch`/`decodeAudioData` pair with length-hint payloads -- the same harness this
+package's own suite runs against, so an adapter test sees exactly the engine
+behaviour the shim does.
+
 ## Testing
 
 ```bash

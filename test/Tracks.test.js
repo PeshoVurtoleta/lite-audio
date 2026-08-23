@@ -630,3 +630,58 @@ describe('reused <audio> element (destroy -> re-init)', () => {
         b.destroy();
     });
 });
+
+// ---------------------------------------------------------------------------
+// P-TV1: setTrackVolume -- the public track-baseline setter (2.12.0, brief A-2).
+// Fail-closed on every unverified input, clamped to [0, 1], mirroring setWidth.
+// ---------------------------------------------------------------------------
+
+describe('setTrackVolume (P-TV1)', () => {
+    it('sets the baseline gain on a wired track', async () => {
+        const { audio, rec } = await boot();
+        audio.playTrack('theme');                      // wires the graph
+        audio.setTrackVolume('theme', 0.4);
+        assert.equal(rec('theme').volumeGain.gain.value, 0.4);
+    });
+
+    it('clamps out-of-range to [0, 1], matching setWidth', async () => {
+        const { audio, rec } = await boot();
+        audio.playTrack('theme');
+        audio.setTrackVolume('theme', -1);
+        assert.equal(rec('theme').volumeGain.gain.value, 0, 'negative clamps to 0');
+        audio.setTrackVolume('theme', 2);
+        assert.equal(rec('theme').volumeGain.gain.value, 1, 'above 1 clamps to 1');
+    });
+
+    it('rejects a non-number without coercion (null is not zero)', async () => {
+        const { audio, rec } = await boot();
+        audio.playTrack('theme');
+        audio.setTrackVolume('theme', 0.5);            // known-good baseline
+        for (const bad of [null, undefined, NaN, '0.5', {}, true]) {
+            audio.setTrackVolume('theme', bad);
+            assert.equal(rec('theme').volumeGain.gain.value, 0.5,
+                'baseline unchanged by ' + String(bad));
+        }
+    });
+
+    it('is a silent no-op for an unknown track name', async () => {
+        const { audio } = await boot();
+        assert.doesNotThrow(() => audio.setTrackVolume('nope', 0.5));
+    });
+
+    it('is a silent no-op before the graph is wired (volumeGain still null)', async () => {
+        const { audio, rec } = await boot();
+        assert.equal(rec('theme').volumeGain, null, 'unwired until first play');
+        assert.doesNotThrow(() => audio.setTrackVolume('theme', 0.5));
+        assert.equal(rec('theme').volumeGain, null, 'still unwired, no phantom node');
+    });
+
+    it('is a silent no-op after destroy', async () => {
+        const { audio, rec } = await boot();
+        audio.playTrack('theme');
+        const node = rec('theme').volumeGain;
+        node.gain.value = 0.6;
+        audio.destroy();
+        assert.doesNotThrow(() => audio.setTrackVolume('theme', 0.1));
+    });
+});

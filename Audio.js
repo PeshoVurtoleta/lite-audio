@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.11.0';
+export const VERSION = '2.12.0';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating
@@ -1857,6 +1857,31 @@ export class LiteAudio {
 
         rec.element?.play();
         rec.playing.set(true);
+    }
+
+    /**
+     * Set a track's baseline gain -- the level volumeGain carries, independent
+     * of the xfade crossfade knob. This is the public setter for a track's
+     * volume after the graph is wired (rec.volume was baked in at wire time).
+     *
+     * Fail closed: an unknown track name is a silent no-op, and so is a track
+     * whose graph is not yet wired (volumeGain still null -- there is no param
+     * to write). `v` is rejected if it is not a number or is NaN (null is not
+     * zero -- no coercion), then clamped to [0, 1], mirroring setWidth()'s
+     * range discipline. Zero allocation: a map lookup and one AudioParam value
+     * write, no closures, no new objects.
+     * @param {string} name
+     * @param {number} v - baseline gain, clamped to [0, 1]
+     * @returns {void}
+     */
+    setTrackVolume(name, v) {
+        if (this._destroyed) return;
+        const rec = this._tracks.get(name);
+        if (!rec) return;                              // unknown track
+        if (!rec.volumeGain) return;                   // graph not yet wired
+        if (typeof v !== 'number' || v !== v) return;  // non-number / NaN
+        if (v < 0) v = 0; else if (v > 1) v = 1;       // clamp to [0, 1]
+        rec.volumeGain.gain.value = v;
     }
 
     /**

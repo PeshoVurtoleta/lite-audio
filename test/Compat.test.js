@@ -49,6 +49,16 @@ const SRC_MAP = {
     '/win.mp3': 500, '/lose.mp3': 500,
 };
 
+/** CONFIG(), with bgm's config-level track volume set explicitly (default config
+ *  never sets one, so `volume ?? 1` bakes in 1 -- P-P10a/P-P10b need a baseline
+ *  other than the ?? default to prove an explicit play() volume overrides it and
+ *  an omitted one does not reset it back to that default). */
+const CONFIG_WITH_TRACK_VOLUME = (vol = 0.3) => {
+    const c = CONFIG();
+    c.bgm = { ...c.bgm, volume: vol };
+    return c;
+};
+
 async function boot({ config = CONFIG(), unlock = true, now } = {}) {
     const ctx = createMockContext({ state: 'suspended' });
     const win = fakeWindow();
@@ -225,6 +235,156 @@ describe('play()', () => {
         const { manager } = await boot();
         manager.destroy();
         assert.equal(manager.play('hit'), null);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// play() on a track, interrupted then replayed  (P-P8, P-P9 -- A-1)
+//
+// BRIEF.md A-1: play() plays a track via playTrack(name, {}), which is
+// documented idempotent and only seeks to 0 under `restart: true` -- so a
+// track stopped part-way and played again RESUMES from where it stopped
+// instead of restarting, unlike the manager surface being emulated (Howler
+// starts a fresh instance at 0 every time). The fix defaults play() to
+// `restart: true` for a track and adds `resume: true` as the opt-in escape
+// hatch. Pre-fix (playTrack(name, {}), no restart forwarded EVER): P-P8 fails
+// because the element is never seeked back to 0 on replay.
+// ---------------------------------------------------------------------------
+
+describe('play() on an interrupted track (P-P8, P-P9 -- A-1)', () => {
+    it('P-P8 play() with NO options RESTARTS an interrupted track (seeks to 0, xfade back to 1)', async () => {
+        const { manager } = await boot();
+        manager.play('bgm');
+        const track = manager.engine._tracks.get('bgm');
+
+        // Advance well into playback, then interrupt part-way (mirrors the
+        // consumer's playExclusive on an outcome track hit mid-fanfare).
+        track.element.currentTime = 45;
+        manager.stopCategory('music', { fade: 0 });
+        assert.equal(manager.engine.trackPlaying('bgm').peek(), false, 'setup: interrupted');
+        assert.equal(track.element.currentTime, 45, 'setup: stop does not itself rewind');
+
+        // Replay with NO options -- the manager surface being emulated (Howler)
+        // always starts a fresh instance at 0, never resumes.
+        manager.play('bgm');
+
+        assert.equal(track.element.currentTime, 0,
+            'A-1: play() with no options must RESTART an interrupted track, not resume it from 45s');
+        assert.equal(track.xfadeGain.gain.value, 1, 'xfadeGain is restored to full on the replay');
+    });
+
+    it('P-P9 play() with { resume: true } opts INTO resuming (contrast with P-P8)', async () => {
+        const { manager } = await boot();
+        manager.play('bgm');
+        const track = manager.engine._tracks.get('bgm');
+
+        track.element.currentTime = 30;
+        manager.stopCategory('music', { fade: 0 });
+        assert.equal(track.element.currentTime, 30, 'setup: interrupted at a nonzero position');
+
+        manager.play('bgm', { resume: true });
+
+        assert.ok(track.element.currentTime > 0,
+            'resume: true must NOT seek to 0 -- it opts out of the restart default');
+        assert.equal(track.element.currentTime, 30, 'position is preserved exactly, not merely nonzero');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// play() track volume forwarding  (P-P10a, P-P10b -- A-2)
+//
+// BRIEF.md A-2: PlayOptions.volume is documented without qualification, but
+// play() forwarded it only on the SFX path; the track path called
+// playTrack(name, {}) and silently dropped it. The fix forwards an EXPLICIT
+// per-play volume via engine.setTrackVolume(name, volume), called AFTER
+// playTrack (a track's volumeGain node wires lazily on first play, so a
+// pre-play setTrackVolume would find it null and no-op -- dropping the level
+// on exactly the play that matters most, the first one). An OMITTED volume
+// must never clobber the config-set baseline with a defaulted 1.
+// ---------------------------------------------------------------------------
+
+describe('play() track volume forwarding (P-P10a, P-P10b -- A-2)', () => {
+    it('P-P10a an explicit volume is honored on the FIRST-EVER play of a track', async () => {
+        const { manager } = await boot({ config: CONFIG_WITH_TRACK_VOLUME(0.3) });
+        const track = manager.engine._tracks.get('bgm');
+        assert.equal(track.volumeGain, null, 'setup: graph (and volumeGain) not yet wired before any play');
+
+        // THE regression: a pre-fix (or wrong-order) forward would call
+        // setTrackVolume before playTrack ever wires the graph, finding
+        // volumeGain still null and silently no-opping. Assert on the FIRST
+        // play, not a second one that would find the graph already wired.
+        manager.play('bgm', { volume: 0.5 });
+
+        assert.notEqual(track.volumeGain, null, 'setup: the first play wired the graph');
+        assert.equal(track.volumeGain.gain.value, 0.5,
+            'A-2: an explicit per-play volume must be honored on the FIRST play, not silently dropped');
+    });
+
+    it('P-P10b an omitted volume never clobbers the config-set baseline', async () => {
+        const { manager } = await boot({ config: CONFIG_WITH_TRACK_VOLUME(0.3) });
+        const track = manager.engine._tracks.get('bgm');
+
+        manager.play('bgm');   // no volume option at all
+        assert.equal(track.volumeGain.gain.value, 0.3,
+            'an omitted volume must leave the config-baked baseline alone, not default-reset it to 1');
+
+        manager.play('bgm', { volume: 0.7 });
+        assert.equal(track.volumeGain.gain.value, 0.7, 'an explicit volume on a later play still applies');
+
+        manager.play('bgm');   // omitted again
+        assert.equal(track.volumeGain.gain.value, 0.7,
+            'omitted again: stays at the last EXPLICIT baseline (0.7), never resets');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// setMuted() realm capture  (P-M5 -- A-5)
+//
+// BRIEF.md A-5: muteEvent() built the CustomEvent from globalThis.CustomEvent
+// read AT DISPATCH TIME, while the class extends whatever EventTarget was
+// bound when Compat.js evaluated. Under a jsdom-in-node harness those are two
+// different realms, and node's EventTarget#dispatchEvent brand-checks its
+// argument -- so every setMuted() threw ERR_INVALID_ARG_TYPE. The fix
+// captures CustomEvent ONCE at module load (see CustomEventCtor in
+// Compat.js), binding it to the SAME realm as the EventTarget the class
+// extends, immune to whatever globalThis.CustomEvent is doing later.
+//
+// This suite is node:test-only (no jsdom, no vitest) so a literal jsdom-vs-
+// node cross-realm rejection cannot be reproduced here. Instead this
+// reproduces the OBSERVABLE failure mode: swap globalThis.CustomEvent, AFTER
+// Compat.js has already been imported (and so already captured its module-
+// load reference), for a foreign constructor whose instances are NOT
+// `instanceof Event` -- structurally identical to what a jsdom CustomEvent
+// looks like to node's real EventTarget, and confirmed by hand to make
+// node's dispatchEvent throw exactly the same
+// "must be an instance of Event" TypeError jsdom-in-node produces for A-5.
+// A pre-fix implementation reading globalThis.CustomEvent AT DISPATCH TIME
+// would build the mutechange event from this foreign ctor and throw; the
+// module-load capture is immune because its reference was taken before the
+// swap ever happened.
+// ---------------------------------------------------------------------------
+
+describe('setMuted() / mutechange realm capture (P-M5, A-5)', () => {
+    it('P-M5 dispatches mutechange via the module-captured CustomEvent, immune to a later global swap', () => {
+        const RealCustomEvent = globalThis.CustomEvent;
+        class ForeignCustomEvent {                      // deliberately NOT a subclass of Event
+            constructor(type, init) { this.type = type; this.detail = init && init.detail; }
+        }
+        globalThis.CustomEvent = ForeignCustomEvent;
+        try {
+            const m = new AudioManager({ window: fakeWindow(), document: mockDocument() });
+            let calls = 0;
+            let detail = null;
+            m.addEventListener('mutechange', (e) => { calls++; detail = e.detail; });
+
+            assert.doesNotThrow(() => m.setMuted(true),
+                'setMuted must not throw even though globalThis.CustomEvent was swapped after module load ' +
+                '(a dispatch-time global read would throw the exact TypeError a jsdom-in-node realm mismatch does)');
+            assert.equal(calls, 1);
+            assert.deepEqual(detail, { isMuted: true }, 'the listener still receives a well-formed detail');
+        } finally {
+            globalThis.CustomEvent = RealCustomEvent;
+        }
     });
 });
 

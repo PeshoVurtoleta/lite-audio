@@ -28,7 +28,10 @@ export interface SoundConfig {
 
 /** Per-play options. Manager-shaped. */
 export interface PlayOptions {
-    /** Volume (0..1). Default: 1 */
+    /** Volume (0..1). Default: 1. Honored for both SFX and tracks: for a track,
+     *  it sets the track baseline for this and subsequent plays until changed
+     *  (forwarded only when explicitly passed, so it never clobbers a config-set
+     *  level). */
     volume?: number;
     /** Loop the sound. Honored for track sounds; inert for pooled SFX. */
     loop?: boolean;
@@ -36,6 +39,9 @@ export interface PlayOptions {
     pitchVar?: number;
     /** Explicit rate override; wins over pitchVar. Default: null */
     pitch?: number | null;
+    /** Resume a track from its paused position instead of restarting; default
+     *  false = restart, matching the manager. Inert for pooled SFX. */
+    resume?: boolean;
 }
 
 /** Stop options. Manager-shaped. */

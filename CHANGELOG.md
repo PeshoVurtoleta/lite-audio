@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.12.0
+
+Consumer-brief fixes for `@zakkster/lite-audio/compat`, from the AU1 Howler
+retirement (`BRIEF.md`). A minor bump: additive engine method + shim behavior
+corrections, no core surface break.
+
+### Added
+
+- **A-4** -- `test/mock-ctx.js` is now published behind a `"./testing"` export
+  (`import { createMockContext } from '@zakkster/lite-audio/testing'`) and added
+  to `files[]`. A consumer writing an adapter over `./compat` can now test it
+  against the real engine in node without vendoring the harness.
+- **A-2** -- `LiteAudio.setTrackVolume(name, v)`: public setter for a track's
+  baseline gain (`volumeGain`, independent of the crossfade knob). Fail-closed
+  no-op on unknown track, an unwired graph, or a non-number / NaN `v`; `v` is
+  clamped to `[0, 1]`, mirroring `setWidth()`. Zero allocation (map lookup + one
+  AudioParam value write); no new branch on any hot path.
+
+### Changed
+
+- **A-1** -- `compat` `play()` on a track now RESTARTS by default (seek to 0),
+  matching the manager's Howler semantics; an interrupted track no longer resumes
+  truncated. New `PlayOptions.resume` (default `false`) opts into resume-from-
+  position. Was `playTrack(name, {})` (idempotent resume); now
+  `playTrack(name, { restart: !resume })`.
+- **A-2** -- `compat` `play()` now forwards `PlayOptions.volume` on the track
+  path via `setTrackVolume`, but ONLY when the caller explicitly passed it, so an
+  omitted volume never clobbers a config-set track level. Previously dropped for
+  tracks.
+
+### Fixed
+
+- **A-5** -- `compat` captures `CustomEvent` once at module load
+  (`CustomEventCtor`), from the same realm whose `EventTarget` the class extends,
+  instead of reading `globalThis.CustomEvent` at dispatch time. Fixes
+  `ERR_INVALID_ARG_TYPE` on every `setMuted()` under a jsdom-in-node harness
+  (jsdom's `CustomEvent` vs node's brand-checking `dispatchEvent`). Node < 19
+  plain-`Event` fallback preserved.
+
+### Docs
+
+- **A-3 / DIV-1** -- documented that declaring a sound `loop` classifies it as a
+  streamed track, so looping a short interaction SFX costs it the pool
+  (decoded buffer -> `<audio>` stream); and that the pre-unlock unlock queue
+  covers pooled SFX only -- `playTrack` returns early pre-unlock, so tracks are
+  not queued (start a track after unlock). `README`, `PARITY.md`, `Compat.js`
+  header, and `decisions/0007-compat-shim.md`.
+
 ## 2.11.0
 
 Changed `applySnapshot(name, ms)` so a live duck rides through the snapshot instead

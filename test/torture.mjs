@@ -475,6 +475,31 @@ const DESTROYBUS_RED = process.env.LITEAUDIO_TORTURE_DESTROYBUS_RED === '1';
 // false and the gate must exit non-zero.
 const SP8_RED = process.env.LITEAUDIO_TORTURE_SP8_RED === '1';
 
+// --- setTrackVolume config (T-TVOL1, AU2 compat-shim fix) ---------------------
+
+// T-TVOL1: v2.12.0's compat-shim fix (A-2, PARITY BRIEF.md) makes setTrackVolume
+// a hot, frequently re-entered path for the first time -- Compat.js#play() now
+// calls it on every explicit per-play volume, AFTER playTrack so the lazily-wired
+// volumeGain exists on the very first play. Its documented contract (Audio.js) is
+// "a map lookup and one AudioParam value write, no closures, no new objects."
+// Two things need proving: (a) TVOL1_OPS steady-state calls on an already-wired
+// track hold ~0 bytes/op and zero major GC, same shape as T-SP1's scalar-stamp
+// ceiling; (b) a TVOL1_CYCLES build/wire/setTrackVolume/destroy soak -- each
+// cycle exercising the full fail-closed matrix (unknown name, unwired graph,
+// non-number, NaN, out-of-range clamp) alongside a valid write -- releases every
+// witness cleanly: lite-leak at 0 and every cycle's <audio> element left paused
+// (no live element outliving its engine's destroy()).
+const TVOL1_OPS = 500_000;
+const TVOL1_WARMUP = 50_000;
+const TVOL1_MAX_BYTES_PER_OP = 4.0;    // mirrors T-SP1's scalar-write ceiling
+const TVOL1_CYCLES = 500;
+// The red control: swaps setTrackVolume for a version that boxes the clamped
+// value into a fresh, retained wrapper object every call instead of writing the
+// scalar straight onto rec.volumeGain.gain.value -- the allocating regression
+// the "no closures, no new objects" contract explicitly rules out. Must blow
+// both the bytesPerOp ceiling and the major-GC budget in phase (a).
+const TVOL1_RED = process.env.LITEAUDIO_TORTURE_TVOL1_RED === '1';
+
 // --- helpers -----------------------------------------------------------------
 
 function die(msg) {
@@ -1144,6 +1169,55 @@ function redApplySnapshotStrand(name, ms = 0) {
             dg.setValueAtTime(DUCK_REST, now);
         }
     }
+}
+
+// --- setTrackVolume fixture + red control (T-TVOL1) ----------------------------
+
+/**
+ * Build a running (auto-unlocked) single-track engine and wire its graph via a
+ * first playTrack -- mirrors test/Tracks.test.js's boot() and T-TRK1's fixture
+ * above. volumeGain must exist (rec.volumeGain !== null) before setTrackVolume
+ * can act on it; playTrack is what wires it.
+ */
+async function buildTvolEngine() {
+    const win = {
+        navigator: { userAgent: 'node-torture-gate', maxTouchPoints: 0 },
+        addEventListener: () => {}, removeEventListener: () => {},
+    };
+    const ctx = createMockContext({ state: 'running' });
+    const doc = mockDocument();
+    const audio = new LiteAudio({
+        buses: ['music'], poolCapacity: 4, window: win, document: doc,
+        fetch: mockFetch({ '/tvol.mp3': 500 }),
+        setTimeout: () => 0, clearTimeout: () => {},
+    });
+    await audio.init(ctx);
+    await audio.defineTracks({ tvol: { src: ['/tvol.mp3'], bus: 'music', volume: 0.6 } });
+    audio.playTrack('tvol');   // wires the graph: volumeGain must exist for the setter to act
+    return { audio, ctx, doc, win };
+}
+
+/**
+ * The T-TVOL1 red control: keeps setTrackVolume's exact fail-closed guards
+ * (destroyed / unknown name / unwired graph / non-number / NaN all still
+ * reject, same clamp to [0, 1]) but writes the clamped value through a fresh
+ * BOXED wrapper object every call, instead of straight onto
+ * rec.volumeGain.gain.value -- the allocating regression the docstring's "no
+ * closures, no new objects" contract rules out. The wrapper is also pushed
+ * onto the module `keep` buffer (the same unbounded-retention buffer AU-01's
+ * object-handle control uses) so the control separates clearly on both
+ * bytesPerOp and retained heap, not just JIT noise. Bound onto the instance in
+ * place of the real method before the T-TVOL1 (a) measurement loop runs.
+ */
+function redSetTrackVolume(name, v) {
+    if (this._destroyed) return;
+    const rec = this._tracks.get(name);
+    if (!rec) return;
+    if (!rec.volumeGain) return;
+    if (typeof v !== 'number' || v !== v) return;
+    const boxed = { v: v < 0 ? 0 : v > 1 ? 1 : v };
+    rec.volumeGain.gain.value = boxed.v;
+    keep.push(boxed);
 }
 
 // --- gate --------------------------------------------------------------------
@@ -2785,6 +2859,125 @@ async function main() {
     }
     dckC.audio.destroy();
 
+    // 17) T-TVOL1 (AU2 compat-shim fix): setTrackVolume(name, v) -- the public
+    //     baseline-gain setter Compat.js's A-2 fix now calls on every explicit
+    //     per-play volume (forwarded AFTER playTrack so the lazily-wired
+    //     volumeGain exists on the very first play). Two things need proving:
+    //     (a) TVOL1_OPS steady-state calls on an already-wired track hold ~0
+    //     bytes/op and zero major GC -- the "map lookup + one AudioParam write,
+    //     no closures, no new objects" contract in Audio.js; (b) a TVOL1_CYCLES
+    //     build/wire/setTrackVolume/destroy soak (a fresh track engine every
+    //     cycle, exercising the fail-closed matrix -- unknown name, non-number,
+    //     NaN, out-of-range clamp -- alongside a valid write) releases every
+    //     witness cleanly: lite-leak at 0 and every cycle's <audio> element left
+    //     paused, none still live after its engine's destroy(). The red control
+    //     (TVOL1_RED) swaps in a setTrackVolume that boxes the clamped value
+    //     into a retained object every call, so phase (a) must blow both the
+    //     bytesPerOp ceiling and the major-GC budget.
+
+    //     (a) allocation + GC budget on an already-wired track.
+    const tvolA = await buildTvolEngine();
+    if (TVOL1_RED) tvolA.audio.setTrackVolume = redSetTrackVolume.bind(tvolA.audio);
+    let tvolToggle = 0;
+    const tvolRow = (() => {
+        const r = measureOps(() => {
+            tvolToggle ^= 1;
+            tvolA.audio.setTrackVolume('tvol', tvolToggle ? 0.3 : 0.7);
+        }, { ops: TVOL1_OPS, warmup: TVOL1_WARMUP, source: 'gc', stabilize: true });
+        return { summary: r.summary, bpo: r.bytesPerOp, noMajor: checkNoGc(r.summary, RULES).ok };
+    })();
+    process.stderr.write('T-TVOL1 (a) ' + (TVOL1_RED ? '(RED: boxed retained write)' : 'setTrackVolume') +
+        ' allocation (' + TVOL1_OPS + ' calls on a wired track): gc major=' + tvolRow.summary.gc.major +
+        ' minor=' + tvolRow.summary.gc.minor + ' maxMs=' + tvolRow.summary.gc.maxMs.toFixed(2) + ' (' +
+        (tvolRow.bpo == null ? 'null' : tvolRow.bpo.toFixed(4)) + ' B/op, ceiling ' + TVOL1_MAX_BYTES_PER_OP + ')\n');
+    if (TVOL1_RED) {
+        const stillClean = tvolRow.noMajor && tvolRow.bpo != null && tvolRow.bpo <= TVOL1_MAX_BYTES_PER_OP;
+        if (stillClean) {
+            die('LITEAUDIO_TORTURE_TVOL1_RED: the boxed-write control measured clean (major=' +
+                tvolRow.summary.gc.major + ', ' + (tvolRow.bpo == null ? 'null' : tvolRow.bpo.toFixed(4)) +
+                ' B/op) -- the red control is no longer modelling the allocating regression it claims and ' +
+                'cannot prove this gate is falsifiable.');
+        }
+        die('LITEAUDIO_TORTURE_TVOL1_RED: the boxed-write setTrackVolume measured major=' +
+            tvolRow.summary.gc.major + ', ' + (tvolRow.bpo == null ? 'null' : tvolRow.bpo.toFixed(4)) +
+            ' B/op (ceiling ' + TVOL1_MAX_BYTES_PER_OP + ') -- rejecting as designed. This is the red ' +
+            'control; a clean run does not take this branch.');
+    }
+    if (!tvolRow.noMajor) {
+        die('T-TVOL1: setTrackVolume violated ' + JSON.stringify(RULES) + ' (major=' + tvolRow.summary.gc.major +
+            ', maxMs=' + tvolRow.summary.gc.maxMs.toFixed(2) + ').');
+    }
+    if (!(tvolRow.bpo != null && tvolRow.bpo <= TVOL1_MAX_BYTES_PER_OP)) {
+        die('T-TVOL1: setTrackVolume measured ' + (tvolRow.bpo == null ? 'null' : tvolRow.bpo.toFixed(4)) +
+            ' B/op, over the ' + TVOL1_MAX_BYTES_PER_OP + ' ceiling -- it is allocating on a hot path that ' +
+            'must not.');
+    }
+    tvolA.audio.destroy();
+
+    //     (b) build/wire/setTrackVolume(fail-closed matrix)/destroy retention soak.
+    const tvolTracker = createLeakTracker({ name: 'lite-audio-settrackvolume-soak' });
+    const TVOL1_NOOP = () => {};
+    let tvolUndead = 0;
+    const tvolElements = [];   // every cycle's element, across the whole soak
+
+    for (let c = 0; c < TVOL1_CYCLES; c++) {
+        const t = await buildTvolEngine();
+        const rec = t.audio._tracks.get('tvol');
+        const volumeGain = rec.volumeGain;
+        const source = rec.source;
+        const xfadeGain = rec.xfadeGain;
+        const element = rec.element;
+        tvolElements.push(element);
+
+        // The fail-closed matrix (P-TV1), exercised at scale alongside a valid
+        // write: unknown name, non-number, NaN, and out-of-range all must leave
+        // the wired gain exactly where the last VALID write left it.
+        t.audio.setTrackVolume('nope', 0.9);          // unknown name: no-op
+        t.audio.setTrackVolume('tvol', 0.4);           // valid
+        t.audio.setTrackVolume('tvol', null);          // non-number: unchanged
+        t.audio.setTrackVolume('tvol', NaN);            // NaN: unchanged
+        t.audio.setTrackVolume('tvol', undefined);      // non-number: unchanged
+        t.audio.setTrackVolume('tvol', '0.9');          // string: unchanged
+        t.audio.setTrackVolume('tvol', -1);             // clamps to 0
+        t.audio.setTrackVolume('tvol', 2);              // clamps to 1
+        t.audio.setTrackVolume('tvol', 0.55);           // valid, final
+
+        if (Math.abs(volumeGain.gain.value - 0.55) > 1e-9) {
+            die('T-TVOL1 (b): cycle ' + c + ' -- volumeGain settled at ' + volumeGain.gain.value +
+                ', expected 0.55 (a rejected write must leave the prior valid value untouched).');
+        }
+
+        const sentinel = { cycle: c };
+        const witness = tvolTracker.track(sentinel, TVOL1_NOOP, c);
+
+        t.audio.destroy();
+
+        const released = volumeGain.disconnected >= 1 && source.disconnected >= 1 &&
+            xfadeGain.disconnected >= 1 && element.paused === true && element.srcReleased === true;
+        if (released) { tvolTracker.untrack(witness); } else { tvolUndead++; }
+    }
+
+    let tvolLiveElements = 0;
+    for (let i = 0; i < tvolElements.length; i++) if (!tvolElements[i].paused) tvolLiveElements++;
+    const tvolLeaked = tvolTracker.size();
+
+    process.stderr.write('T-TVOL1 (b) retention: ' + TVOL1_CYCLES + ' build/wire/setTrackVolume(fail-closed ' +
+        'matrix)/destroy cycles -- lite-leak witnessed ' + tvolLeaked + ' un-released record(s), ' + tvolUndead +
+        ' incomplete release(s), ' + tvolLiveElements + ' still-live element(s) of ' + tvolElements.length +
+        ' built (all expected 0)\n');
+    if (tvolUndead !== 0) {
+        die('T-TVOL1: ' + tvolUndead + ' cycle(s) left their volumeGain/source/xfadeGain node or <audio> element ' +
+            'un-released after destroy() -- setTrackVolume must not add retention surface destroy() fails to ' +
+            'release.');
+    }
+    if (tvolLeaked !== 0) {
+        die('T-TVOL1: lite-leak witnessed ' + tvolLeaked + ' un-released record(s) after ' + TVOL1_CYCLES + ' cycles.');
+    }
+    if (tvolLiveElements !== 0) {
+        die('T-TVOL1: ' + tvolLiveElements + ' of ' + tvolElements.length + ' elements are still un-paused after ' +
+            'their engine\'s destroy() (expected 0).');
+    }
+
     process.stderr.write(
         'result: boxed-double handle (bus>=1, gen>8388608) is below the gate resolution; ' +
         'plain-number handle keeps its zero-retain property (decisions/0001). The v1.2.0 ' +
@@ -2826,7 +3019,12 @@ async function main() {
         'existing edge rests it when the trigger drops; the reconcile scan is zero-alloc and a ' + DCK1_CYCLES +
         '-cycle play/tick/applySnapshot/stopAll/tick soak leaves 0 stranded and 0 leaked, _duckRules.length ' +
         'constant, released clean, while the red control (DCK1_RED) reproduces the superseded draft\'s ' +
-        'hot->cold strand and is rejected (T-DCK1).\n');
+        'hot->cold strand and is rejected (T-DCK1). ' +
+        'AU2: setTrackVolume(name, v) -- the compat-shim\'s A-2 per-play-volume setter -- is a zero-alloc scalar ' +
+        'write over ' + TVOL1_OPS + ' calls on an already-wired track, and a ' + TVOL1_CYCLES + '-cycle build/' +
+        'wire/setTrackVolume(fail-closed matrix)/destroy soak releases every witness cleanly (lite-leak 0, every ' +
+        'element left paused), while the red control (TVOL1_RED) reproduces a boxed-retained-write regression ' +
+        'and is rejected (T-TVOL1).\n');
     process.stdout.write('ok\n');
     process.exit(0);
 }

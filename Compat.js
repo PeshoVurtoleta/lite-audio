@@ -24,6 +24,10 @@
  *      lite-audio track (real streaming, real fades); everything else maps to a
  *      pooled SFX voice. This is the value-add - a migrant's background music
  *      stops being a looping decoded buffer and becomes an actual stream.
+ *      Trade-off (A-3): declaring a sound `loop` classifies it as a streamed
+ *      track, so looping a short interaction SFX costs it the pool - it goes
+ *      from a decoded buffer to an <audio> stream. The pool has no loop; a
+ *      looping one-shot has no pooled option.
  *
  *   2. Categories become buses. A manager category is an arbitrary config
  *      string; lite-audio has real buses. `init` auto-creates one bus per
@@ -53,16 +57,28 @@ const EXCLUSIVE_CATEGORY = 'outcome';
 const DEFAULT_FADE_MS = 120;
 
 /**
- * Build the mute-change event. `CustomEvent` is a browser global and a Node
- * global from v19; on older Node we fall back to a plain Event carrying the
- * same `.detail`, so a listener reading `e.detail.isMuted` works everywhere and
- * the shim keeps its zero-dependency promise.
+ * CustomEvent captured ONCE at module load, from the same realm whose
+ * EventTarget the class below extends. Reading `globalThis.CustomEvent` at
+ * dispatch time is the A-5 bug: under a jsdom-in-node harness the global is
+ * jsdom's CustomEvent while EventTarget is node's, and node's dispatchEvent
+ * brand-checks its argument -- so every setMuted() throws ERR_INVALID_ARG_TYPE.
+ * Capturing here binds both to the realm active when Compat.js evaluated.
+ * null on Node < 19, where the muteEvent() fallback builds a plain Event.
+ */
+const CustomEventCtor = typeof CustomEvent === 'function' ? CustomEvent : null;
+
+/**
+ * Build the mute-change event. Uses the realm-captured CustomEventCtor rather
+ * than reading the global at dispatch time (see A-5 above). On Node < 19
+ * (CustomEventCtor === null) we fall back to a plain Event carrying the same
+ * `.detail`, so a listener reading `e.detail.isMuted` works everywhere and the
+ * shim keeps its zero-dependency promise.
  * @param {boolean} isMuted
  */
 function muteEvent(isMuted) {
     const detail = { isMuted };
-    if (typeof CustomEvent === 'function') {
-        return new CustomEvent('mutechange', { detail });
+    if (CustomEventCtor !== null) {
+        return new CustomEventCtor('mutechange', { detail });
     }
     const e = new Event('mutechange');
     e.detail = detail;
@@ -238,21 +254,46 @@ export class AudioManager extends EventTarget {
      * Play a sound by name.
      * @param {string} name
      * @param {Object} [options]
-     * @param {number} [options.volume=1]
+     * @param {number} [options.volume=1] - honored for both paths. For a track
+     *   it is forwarded to the engine ONLY when explicitly passed (an omitted
+     *   volume never clobbers a config-set track level) and sets the track's
+     *   baseline for this and subsequent plays until changed.
      * @param {boolean} [options.loop=false] - honored only for track sounds; a
      *   pooled SFX voice does not loop (route looping audio through config).
      * @param {number} [options.pitchVar=0]
      * @param {number|null} [options.pitch=null] - explicit rate; wins over pitchVar.
+     * @param {boolean} [options.resume=false] - track path only. Default false
+     *   RESTARTS the track (seek to 0), matching the manager's Howler semantics;
+     *   true resumes from the paused position. Inert for pooled SFX.
      * @returns {number|null} a handle-shaped number, or null if skipped/queued.
      */
-    play(name, { volume = 1, loop = false, pitchVar = 0, pitch = null } = {}) {
+    play(name, options = {}) {
         if (this.#destroyed) return null;
+
+        const { volume = 1, loop = false, pitchVar = 0, pitch = null, resume = false } = options;
 
         if (this.#trackNames.has(name)) {
             // A track is a name-addressed singleton with no per-play handle; hand
             // back a monotonic positive id so the manager's `number|null` return
             // contract holds and the caller can tell "played" from "skipped".
-            this.#audio.playTrack(name, {});
+
+            // A-1: the manager surface RESTARTS on play (Howler starts a new
+            // instance at position 0 every time). Default to restart; resume:true
+            // opts into the engine's idempotent resume-from-position instead, so
+            // resume wins over the restart default.
+            this.#audio.playTrack(name, { restart: !resume });
+
+            // A-2: forward a per-play volume ONLY when the caller explicitly
+            // passed one, so an omitted volume leaves the config-set track level
+            // untouched (a defaulted volume:1 would silently overwrite it). Set
+            // AFTER playTrack: a track's graph (and its volumeGain node) wires
+            // lazily on first play, so a pre-play setTrackVolume would no-op and
+            // drop the level on the very first play - the one that matters for a
+            // freshly started loop. A track is a singleton, so this sets the
+            // baseline for this and every later play until changed; xfadeGain
+            // carries the fade while volumeGain is the constant baseline, so
+            // setting it just after the (0 ms) start is imperceptible.
+            if (options.volume !== undefined) this.#audio.setTrackVolume(name, volume);
             return ++this.#trackPlayId;
         }
 

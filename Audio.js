@@ -7,7 +7,7 @@ import { AudioPool } from '@zakkster/lite-audio-pool';
  * Package version, kept in lockstep with package.json (the /release gate syncs
  * the two). A cold module-level constant -- read at import, never on a hot path.
  */
-export const VERSION = '2.12.0';
+export const VERSION = '2.12.1';
 
 /**
  * Persistence key: byte-identical to lite-audio-manager so a game migrating

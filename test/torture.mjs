@@ -544,16 +544,44 @@ function objectHandle() {
 function measure(label, fn) {
     let i = 0;
     const r = measureOps(() => fn(i++), { ops: OPS, warmup: WARMUP, source: 'gc' });
-    const bpo = r.bytesPerOp == null ? NaN : r.bytesPerOp;
     const report = checkNoGc(r.summary, RULES);
-    return { label, bytesPerOp: bpo, major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok };
+    return { label, bytesPerOp: r.bytesPerOp, bracketInverted: r.bracketInverted, major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok };
 }
 
 function fmt(row) {
+    const inverted = row.bracketInverted || row.bytesPerOp == null;
+    const bpoStr = inverted ? '0.0000inv' : row.bytesPerOp.toFixed(4);
     return '  ' + row.label.padEnd(18) +
-        ' bytesPerOp=' + (Number.isFinite(row.bytesPerOp) ? row.bytesPerOp.toFixed(4) : 'null').padStart(10) +
+        ' bytesPerOp=' + bpoStr.padStart(10) +
         '  major=' + String(row.major).padStart(2) +
         '  maxMs=' + row.maxMs.toFixed(3);
+}
+
+/**
+ * bytesPerOp for a CANDIDATE (shipped zero-alloc) path. lite-gc-profiler returns
+ * bytesPerOp===null with bracketInverted===true when the steady-phase heap delta
+ * is NEGATIVE (GC reclaimed inside the measured window, so the end anchor reads
+ * below the start). A null-from-inversion PROVES the path did not net-allocate
+ * (the heap went DOWN), so on a candidate we read it as a measured 0 -- BUT only
+ * when no major GC fired (major===0). If a major GC DID fire, an inversion could
+ * be masking a real allocation the collector already swept, so we return NaN and
+ * the `<= ceiling` comparison fails. CONTROL paths never use this: they keep the
+ * raw number so their falsifiability floors stay honest.
+ */
+function candidateBpo(row) {
+    if (row.bracketInverted || row.bytesPerOp == null) {
+        return row.major === 0 ? 0 : NaN;
+    }
+    return row.bytesPerOp;
+}
+
+// Null-safe bytesPerOp formatter for die/diagnostic messages. A raw control
+// bytesPerOp is null on an inverted bracket (negative surviving-heap delta);
+// render that as the same '0.0000inv' marker fmt uses, so a message never
+// throws a TypeError calling .toFixed on null. Message formatting only -- it
+// never feeds a comparison, ceiling, or floor.
+function bpoStr(x) {
+    return x == null ? '0.0000inv' : Number(x).toFixed(4);
 }
 
 /**
@@ -574,9 +602,11 @@ function measurePositionBestOf(label, writer, ops, warmup, passes) {
         let i = 0;
         const r = measureOps(() => writer(i++), { ops, warmup, source: 'gc', stabilize: true });
         const report = checkNoGc(r.summary, RULES);
-        const bpo = r.bytesPerOp == null ? NaN : r.bytesPerOp;
-        const row = { label, bytesPerOp: bpo, major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok };
-        if (best === null || (Number.isFinite(bpo) && (!Number.isFinite(best.bytesPerOp) || bpo < best.bytesPerOp))) {
+        const row = { label, bytesPerOp: r.bytesPerOp, bracketInverted: r.bracketInverted, major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok };
+        // Interpret an inverted/null pass as a measured 0 (major-guarded) BEFORE
+        // the min-select, so an all-inverted set yields a best of 0, not null.
+        const bpo = candidateBpo(row);
+        if (best === null || (Number.isFinite(bpo) && (!Number.isFinite(candidateBpo(best)) || bpo < candidateBpo(best)))) {
             best = row;
         }
     }
@@ -1256,7 +1286,7 @@ async function main() {
 
     // 1) The harness must actually see allocation, or nothing below means anything.
     if (!(control.bytesPerOp >= CONTROL_MIN_BYTES_PER_OP)) {
-        die('control (retained object handle) measured ' + control.bytesPerOp.toFixed(4) +
+        die('control (retained object handle) measured ' + bpoStr(control.bytesPerOp) +
             ' bytes/op, below the ' + CONTROL_MIN_BYTES_PER_OP + ' floor -- the gate cannot ' +
             'see allocation and is not falsifiable.');
     }
@@ -1264,7 +1294,7 @@ async function main() {
     // 2) LEAK mode: the gated path IS the allocating variant, so we must reject.
     if (LEAK) {
         die('LEAK mode: gated path is the object-handle variant (' +
-            control.bytesPerOp.toFixed(4) + ' bytes/op) -- rejecting as designed. ' +
+            bpoStr(control.bytesPerOp) + ' bytes/op) -- rejecting as designed. ' +
             'This is the falsification control; a clean run does not take this branch.');
     }
 
@@ -1276,8 +1306,8 @@ async function main() {
             die(row.label + ': ' + row.major + ' major GC / maxMs ' + row.maxMs.toFixed(3) +
                 ' violates ' + JSON.stringify(RULES));
         }
-        if (!(row.bytesPerOp <= HANDLE_MAX_BYTES_PER_OP)) {
-            die(row.label + ': handle return measured ' + row.bytesPerOp.toFixed(4) +
+        if (!(candidateBpo(row) <= HANDLE_MAX_BYTES_PER_OP)) {
+            die(row.label + ': handle return measured ' + candidateBpo(row).toFixed(4) +
                 ' bytes/op, over the ' + HANDLE_MAX_BYTES_PER_OP + ' ceiling -- the handle ' +
                 'path is retaining allocation it should not.');
         }
@@ -1291,7 +1321,7 @@ async function main() {
         const r = measureOps(tickFn, { ops: MON_OPS, warmup: MON_WARMUP, source: 'gc', stabilize: true });
         const report = checkNoGc(r.summary, RULES);
         return {
-            label: 'monitor-tick', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            label: 'monitor-tick', bytesPerOp: r.bytesPerOp, bracketInverted: r.bracketInverted,
             major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
         };
     })();
@@ -1303,8 +1333,8 @@ async function main() {
         die('monitor-tick: ' + mon.major + ' major GC / maxMs ' + mon.maxMs.toFixed(3) +
             ' violates ' + JSON.stringify(RULES));
     }
-    if (!(mon.bytesPerOp <= MON_MAX_BYTES_PER_OP)) {
-        die('monitor-tick measured ' + mon.bytesPerOp.toFixed(4) + ' bytes/op, over the ' +
+    if (!(candidateBpo(mon) <= MON_MAX_BYTES_PER_OP)) {
+        die('monitor-tick measured ' + candidateBpo(mon).toFixed(4) + ' bytes/op, over the ' +
             MON_MAX_BYTES_PER_OP + ' ceiling -- a mix feature is allocating on the monitor path.');
     }
 
@@ -1323,7 +1353,7 @@ async function main() {
         const r = measureOps(() => sp1Gated(i++), { ops: SP1_OPS, warmup: SP1_WARMUP, source: 'gc', stabilize: true });
         const report = checkNoGc(r.summary, RULES);
         return {
-            label: SP1_RED ? 'T-SP1:RED' : 'T-SP1', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            label: SP1_RED ? 'T-SP1:RED' : 'T-SP1', bytesPerOp: r.bytesPerOp, bracketInverted: r.bracketInverted,
             major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
         };
     })();
@@ -1333,7 +1363,7 @@ async function main() {
         let i = 0;
         const r = measureOps(() => boxedWriter(i++), { ops: SP1_OPS, warmup: SP1_WARMUP, source: 'gc', stabilize: true });
         return {
-            label: 'T-SP1:control', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            label: 'T-SP1:control', bytesPerOp: r.bytesPerOp, bracketInverted: r.bracketInverted,
             major: r.summary.gc.major, maxMs: r.summary.gc.maxMs,
         };
     })();
@@ -1343,21 +1373,21 @@ async function main() {
     process.stderr.write(fmt(sp1Control) + '\n');
 
     if (!(sp1Control.bytesPerOp >= SP1_CONTROL_MIN_BYTES_PER_OP)) {
-        die('T-SP1 control (retained {x,y,z} box) measured ' + sp1Control.bytesPerOp.toFixed(4) +
+        die('T-SP1 control (retained {x,y,z} box) measured ' + bpoStr(sp1Control.bytesPerOp) +
             ' bytes/op, below the ' + SP1_CONTROL_MIN_BYTES_PER_OP + ' floor -- the gate cannot ' +
             'see allocation and is not falsifiable.');
     }
     if (SP1_RED) {
         die('SP1_RED: gated setPosition path is the retained-box variant (' +
-            sp1Row.bytesPerOp.toFixed(4) + ' bytes/op) -- rejecting as designed. This is the ' +
+            bpoStr(sp1Row.bytesPerOp) + ' bytes/op) -- rejecting as designed. This is the ' +
             'red control; a clean run does not take this branch.');
     }
     if (!sp1Row.noMajor) {
         die('T-SP1: ' + sp1Row.major + ' major GC / maxMs ' + sp1Row.maxMs.toFixed(3) +
             ' violates ' + JSON.stringify(RULES));
     }
-    if (!(sp1Row.bytesPerOp <= SP1_MAX_BYTES_PER_OP)) {
-        die('T-SP1: setPosition measured ' + sp1Row.bytesPerOp.toFixed(4) + ' bytes/op, over the ' +
+    if (!(candidateBpo(sp1Row) <= SP1_MAX_BYTES_PER_OP)) {
+        die('T-SP1: setPosition measured ' + candidateBpo(sp1Row).toFixed(4) + ' bytes/op, over the ' +
             SP1_MAX_BYTES_PER_OP + ' ceiling -- the position path is allocating on the caller frame.');
     }
     sp1.audio.destroy();
@@ -1586,7 +1616,7 @@ async function main() {
         const r = measureOps(() => writer(i++), { ops: SP5_POS_OPS, warmup: SP5_POS_WARMUP, source: 'gc', stabilize: true });
         const report = checkNoGc(r.summary, RULES);
         return {
-            label: 'T-SP5:setPosition', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            label: 'T-SP5:setPosition', bytesPerOp: r.bytesPerOp, bracketInverted: r.bracketInverted,
             major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
         };
     })();
@@ -1596,8 +1626,8 @@ async function main() {
         die('T-SP5: setPosition (hrtf bus) ' + hrtfPosRow.major + ' major GC / maxMs ' +
             hrtfPosRow.maxMs.toFixed(3) + ' violates ' + JSON.stringify(RULES));
     }
-    if (!(hrtfPosRow.bytesPerOp <= SP5_POS_MAX_BYTES_PER_OP)) {
-        die('T-SP5: setPosition on an hrtf bus measured ' + hrtfPosRow.bytesPerOp.toFixed(4) +
+    if (!(candidateBpo(hrtfPosRow) <= SP5_POS_MAX_BYTES_PER_OP)) {
+        die('T-SP5: setPosition on an hrtf bus measured ' + candidateBpo(hrtfPosRow).toFixed(4) +
             ' bytes/op, over the ' + SP5_POS_MAX_BYTES_PER_OP + ' ceiling -- the hrtf-bus position ' +
             'path is allocating on the caller frame.');
     }
@@ -1718,7 +1748,7 @@ async function main() {
         const r = measureOps(() => sp6Gated(i++), { ops: SP6_OPS, warmup: SP6_WARMUP, source: 'gc', stabilize: true });
         const report = checkNoGc(r.summary, RULES);
         return {
-            label: SP6_ALLOC_RED ? 'T-SP6:ALLOC_RED' : 'T-SP6', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            label: SP6_ALLOC_RED ? 'T-SP6:ALLOC_RED' : 'T-SP6', bytesPerOp: r.bytesPerOp, bracketInverted: r.bracketInverted,
             major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
         };
     })();
@@ -1726,7 +1756,7 @@ async function main() {
         let i = 0;
         const r = measureOps(() => boxedWidth(i++), { ops: SP6_OPS, warmup: SP6_WARMUP, source: 'gc', stabilize: true });
         return {
-            label: 'T-SP6:control', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            label: 'T-SP6:control', bytesPerOp: r.bytesPerOp, bracketInverted: r.bracketInverted,
             major: r.summary.gc.major, maxMs: r.summary.gc.maxMs,
         };
     })();
@@ -1734,21 +1764,21 @@ async function main() {
     process.stderr.write(fmt(sp6Row) + '\n');
     process.stderr.write(fmt(sp6Control) + '\n');
     if (!(sp6Control.bytesPerOp >= SP6_CONTROL_MIN_BYTES_PER_OP)) {
-        die('T-SP6 control (retained {w} box) measured ' + sp6Control.bytesPerOp.toFixed(4) +
+        die('T-SP6 control (retained {w} box) measured ' + bpoStr(sp6Control.bytesPerOp) +
             ' bytes/op, below the ' + SP6_CONTROL_MIN_BYTES_PER_OP + ' floor -- the gate cannot ' +
             'see allocation and is not falsifiable.');
     }
     if (SP6_ALLOC_RED) {
         die('SP6_ALLOC_RED: gated setWidth path is the retained-box variant (' +
-            sp6Row.bytesPerOp.toFixed(4) + ' bytes/op) -- rejecting as designed. This is the red ' +
+            bpoStr(sp6Row.bytesPerOp) + ' bytes/op) -- rejecting as designed. This is the red ' +
             'control; a clean run does not take this branch.');
     }
     if (!sp6Row.noMajor) {
         die('T-SP6: ' + sp6Row.major + ' major GC / maxMs ' + sp6Row.maxMs.toFixed(3) +
             ' violates ' + JSON.stringify(RULES));
     }
-    if (!(sp6Row.bytesPerOp <= SP6_MAX_BYTES_PER_OP)) {
-        die('T-SP6: setWidth measured ' + sp6Row.bytesPerOp.toFixed(4) + ' bytes/op, over the ' +
+    if (!(candidateBpo(sp6Row) <= SP6_MAX_BYTES_PER_OP)) {
+        die('T-SP6: setWidth measured ' + candidateBpo(sp6Row).toFixed(4) + ' bytes/op, over the ' +
             SP6_MAX_BYTES_PER_OP + ' ceiling -- the width path is allocating on the caller frame.');
     }
     sp6a.audio.destroy();
@@ -1877,8 +1907,8 @@ async function main() {
         die('T-SP4: setPosition (discrete bus) ' + dposRow.major + ' major GC / maxMs ' +
             dposRow.maxMs.toFixed(3) + ' violates ' + JSON.stringify(RULES));
     }
-    if (!(dposRow.bytesPerOp <= SP5_POS_MAX_BYTES_PER_OP)) {
-        die('T-SP4: setPosition on a discrete bus measured ' + dposRow.bytesPerOp.toFixed(4) +
+    if (!(candidateBpo(dposRow) <= SP5_POS_MAX_BYTES_PER_OP)) {
+        die('T-SP4: setPosition on a discrete bus measured ' + candidateBpo(dposRow).toFixed(4) +
             ' bytes/op, over the ' + SP5_POS_MAX_BYTES_PER_OP + ' ceiling -- the discrete family did ' +
             'NOT reuse the zero-alloc scalar stamp (a second position code path).');
     }
@@ -1962,7 +1992,7 @@ async function main() {
             const report = checkNoGc(r.summary, RULES);
             return {
                 label: (applyRed ? 'T-SP3-lane:RED[' : 'T-SP3-lane[') + preset + ']',
-                bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+                bytesPerOp: r.bytesPerOp, bracketInverted: r.bracketInverted,
                 major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
             };
         })();
@@ -1972,20 +2002,20 @@ async function main() {
         if (applyRed) {
             if (!(laneRow.bytesPerOp >= SP3_LANE_RED_MIN_BYTES_PER_OP)) {
                 die('SP3_LANE_RED: the fresh-Float32Array-per-solve control measured ' +
-                    laneRow.bytesPerOp.toFixed(4) + ' bytes/op, below the ' + SP3_LANE_RED_MIN_BYTES_PER_OP +
+                    bpoStr(laneRow.bytesPerOp) + ' bytes/op, below the ' + SP3_LANE_RED_MIN_BYTES_PER_OP +
                     ' floor -- the red control is not modelling the allocation it claims and cannot prove ' +
                     'this gate is falsifiable.');
             }
             die('SP3_LANE_RED: gated _flushLanes allocates a fresh Float32Array per solve (' +
-                laneRow.bytesPerOp.toFixed(4) + ' bytes/op) -- rejecting as designed. This is the red ' +
+                bpoStr(laneRow.bytesPerOp) + ' bytes/op) -- rejecting as designed. This is the red ' +
                 'control; a clean run does not take this branch.');
         }
         if (!laneRow.noMajor) {
             die('T-SP3-lane[' + preset + ']: ' + laneRow.major + ' major GC / maxMs ' + laneRow.maxMs.toFixed(3) +
                 ' violates ' + JSON.stringify(RULES));
         }
-        if (!(laneRow.bytesPerOp <= SP3_LANE_MAX_BYTES_PER_OP)) {
-            die('T-SP3-lane[' + preset + ']: _flushLanes measured ' + laneRow.bytesPerOp.toFixed(4) + ' bytes/op, over the ' +
+        if (!(candidateBpo(laneRow) <= SP3_LANE_MAX_BYTES_PER_OP)) {
+            die('T-SP3-lane[' + preset + ']: _flushLanes measured ' + candidateBpo(laneRow).toFixed(4) + ' bytes/op, over the ' +
                 SP3_LANE_MAX_BYTES_PER_OP + ' ceiling -- the ' + laneCount + '-lane solve/flush is allocating on the monitor path.');
         }
         lane.audio.destroy();
@@ -2480,7 +2510,7 @@ async function main() {
             { ops: SP8_OPS, warmup: 50_000, source: 'gc', stabilize: true });
         const report = checkNoGc(r.summary, RULES);
         return {
-            label: 'T-SP8:_monitorIdle', bytesPerOp: r.bytesPerOp == null ? NaN : r.bytesPerOp,
+            label: 'T-SP8:_monitorIdle', bytesPerOp: r.bytesPerOp, bracketInverted: r.bracketInverted,
             major: r.summary.gc.major, maxMs: r.summary.gc.maxMs, noMajor: report.ok,
         };
     })();
@@ -2491,8 +2521,8 @@ async function main() {
         die('T-SP8: _monitorIdle() ' + sp8FRow.major + ' major GC / maxMs ' + sp8FRow.maxMs.toFixed(3) +
             ' violates ' + JSON.stringify(RULES));
     }
-    if (!(sp8FRow.bytesPerOp <= SP8_MAX_BYTES_PER_OP)) {
-        die('T-SP8: _monitorIdle() measured ' + sp8FRow.bytesPerOp.toFixed(4) + ' bytes/op, over the ' +
+    if (!(candidateBpo(sp8FRow) <= SP8_MAX_BYTES_PER_OP)) {
+        die('T-SP8: _monitorIdle() measured ' + candidateBpo(sp8FRow).toFixed(4) + ' bytes/op, over the ' +
             SP8_MAX_BYTES_PER_OP + ' ceiling -- the cold predicate is allocating.');
     }
     sp8F.audio.destroy();
@@ -2853,8 +2883,9 @@ async function main() {
         'gc major=' + dckGc.summary.gc.major + ' minor=' + dckGc.summary.gc.minor + ' maxMs=' +
         dckGc.summary.gc.maxMs.toFixed(2) + ' (' + (dckGc.bytesPerOp == null ? 'null' : dckGc.bytesPerOp.toFixed(4)) + ' B/op)\n');
     if (!dckReport.ok) die('T-DCK1 (c): applySnapshot scan violated ' + JSON.stringify(RULES) + ' (major=' + dckGc.summary.gc.major + ').');
-    if (!(dckGc.bytesPerOp != null && dckGc.bytesPerOp <= DCK1_MAX_BYTES_PER_OP)) {
-        die('T-DCK1 (c): applySnapshot reconcile measured ' + (dckGc.bytesPerOp == null ? 'null' : dckGc.bytesPerOp.toFixed(4)) +
+    const dckBpo = candidateBpo({ bytesPerOp: dckGc.bytesPerOp, bracketInverted: dckGc.bracketInverted, major: dckGc.summary.gc.major });
+    if (!(dckBpo <= DCK1_MAX_BYTES_PER_OP)) {
+        die('T-DCK1 (c): applySnapshot reconcile measured ' + (dckGc.bytesPerOp == null ? '0.0000inv' : dckGc.bytesPerOp.toFixed(4)) +
             ' B/op, over the ' + DCK1_MAX_BYTES_PER_OP + ' ceiling -- the scan is allocating.');
     }
     dckC.audio.destroy();
@@ -2884,7 +2915,7 @@ async function main() {
             tvolToggle ^= 1;
             tvolA.audio.setTrackVolume('tvol', tvolToggle ? 0.3 : 0.7);
         }, { ops: TVOL1_OPS, warmup: TVOL1_WARMUP, source: 'gc', stabilize: true });
-        return { summary: r.summary, bpo: r.bytesPerOp, noMajor: checkNoGc(r.summary, RULES).ok };
+        return { summary: r.summary, bpo: r.bytesPerOp, bracketInverted: r.bracketInverted, noMajor: checkNoGc(r.summary, RULES).ok };
     })();
     process.stderr.write('T-TVOL1 (a) ' + (TVOL1_RED ? '(RED: boxed retained write)' : 'setTrackVolume') +
         ' allocation (' + TVOL1_OPS + ' calls on a wired track): gc major=' + tvolRow.summary.gc.major +
@@ -2907,8 +2938,9 @@ async function main() {
         die('T-TVOL1: setTrackVolume violated ' + JSON.stringify(RULES) + ' (major=' + tvolRow.summary.gc.major +
             ', maxMs=' + tvolRow.summary.gc.maxMs.toFixed(2) + ').');
     }
-    if (!(tvolRow.bpo != null && tvolRow.bpo <= TVOL1_MAX_BYTES_PER_OP)) {
-        die('T-TVOL1: setTrackVolume measured ' + (tvolRow.bpo == null ? 'null' : tvolRow.bpo.toFixed(4)) +
+    const tvolBpo = candidateBpo({ bytesPerOp: tvolRow.bpo, bracketInverted: tvolRow.bracketInverted, major: tvolRow.summary.gc.major });
+    if (!(tvolBpo <= TVOL1_MAX_BYTES_PER_OP)) {
+        die('T-TVOL1: setTrackVolume measured ' + (tvolRow.bpo == null ? '0.0000inv' : tvolRow.bpo.toFixed(4)) +
             ' B/op, over the ' + TVOL1_MAX_BYTES_PER_OP + ' ceiling -- it is allocating on a hot path that ' +
             'must not.');
     }

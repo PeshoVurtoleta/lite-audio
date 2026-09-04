@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.12.1
+
+Patch: torture-harness fix for node v26.3.1. No library behavior change
+(`Audio.js` unchanged except the `VERSION` constant).
+
+### Fixed
+
+- The torture gate treated `@zakkster/lite-gc-profiler` `bytesPerOp === null`
+  (an inverted GC bracket -- the steady-phase heap anchor read below the start
+  because a collection ran inside the window) as an allocation failure. On node
+  v26.3.1 genuinely zero-alloc paths (T-SP1 `setPosition`, T-DCK1(c),
+  T-TVOL1(a)) now invert the bracket, so `node --expose-gc test/torture.mjs`
+  failed with `measured NaN bytes/op`. `test/torture.mjs` now maps a
+  `bracketInverted`/null reading to 0 bytes/op at candidate-vs-ceiling sites,
+  guarded by `major === 0`, via a `candidateBpo(row)` helper; control and RED
+  floors keep the raw number, so every RED control still trips (SP1_RED
+  47.98 B/op, TVOL1_RED 83.22 B/op at `major=0`). A `bpoStr()` formatter renders
+  an inverted control reading as `0.0000inv` instead of throwing. All 15 RED
+  controls still exit non-zero; `npm test` 473/473.
+
 ## 2.12.0
 
 Consumer-brief fixes for `@zakkster/lite-audio/compat`, from the AU1 Howler
